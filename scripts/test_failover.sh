@@ -1,5 +1,5 @@
 #!/bin/bash
-# Demonstrates URLLC fast failover: cut the SHORT path, watch traffic move to the LONG path.
+# Demonstrates URLLC fast failover: cut the primary fast path, watch traffic move to the diagonal backup path.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/scripts/common.sh"
 echo "--- before: RTT on SHORT path"; hexec h5 ping -c 3 -q 10.0.0.2 | tail -1
