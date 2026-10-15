@@ -26,69 +26,91 @@ Mininet + Open vSwitch + Ryu SDN lab emulating a **5G transport network fabric**
 Three standardized 3GPP slice traffic classes (eMBB, URLLC, mMTC) share one physical ring with slice-specific routing, queuing, rate-limiting, and proactive fast failover.
 
 ```mermaid
-flowchart LR
-    %% Devices
-    h3((h3))
-    h4((h4))
-    h5((h5))
-    h6((h6))
-    h7((h7))
-    h8((h8))
-    h9((h9))
-
-    %% Edge
-    s5[s5 / gNodeB-A]
-    s6[s6 / gNodeB-B]
-
-    %% Core
-    s1{s1 Ingress}
-    s2{s2}
-    s3{s3}
-    s4{s4}
-
-    %% UPFs
-    h1[h1 / eMBB-UPF]
-    h2[h2 / URLLC-UPF]
-
-    %% Connections
-    subgraph eMBB_Slice [eMBB]
-        h3 --> s5
-        h4 --> s5
-    end
-    
-    subgraph URLLC_Slice [URLLC]
-        h5 --> s5
-        h6 --> s5
-    end
-    
-    subgraph mMTC_Slice [mMTC]
-        h7 --> s6
-        h8 --> s6
-        h9 --> s6
+flowchart TD
+    %% RAN Edge Subgraphs
+    subgraph RAN_A [gNodeB-A Suburb / s5]
+        h3((h3 Phone 1 - eMBB))
+        h4((h4 Phone 2 - eMBB))
+        h5((h5 Car 1 - URLLC))
+        h6((h6 Car 2 - URLLC))
+        h10>h10 Mobile UE - Roams]
     end
 
-    s5 ==>|Aggregate| s1
-    s6 ==>|Aggregate| s3
+    subgraph RAN_B [gNodeB-B Smart City / s6]
+        h7((h7 Smart Grid - mMTC))
+        h8((h8 CCTV Video - mMTC))
+        h9((h9 Smart Meter - mMTC))
+    end
 
-    s1 -.->|eMBB LONG| s2 -.-> s3 -.-> s4
-    s1 ===|URLLC SHORT| s4
+    subgraph RAN_C [gNodeB-C Stadium / s7]
+        h12((h12 Robot - URLLC))
+        h13((h13 AR Headset - eMBB))
+    end
 
-    s2 --> h1
-    s4 --> h2
+    %% Core Transit Ring & Gateway
+    subgraph Core_Ring [Core Aggregation & Transit Ring]
+        s1{s1 Ingress / Mirror}
+        s2{s2 Metro Transit}
+        s3{s3 Aggregator}
+        s4{s4 URLLC Core}
+        s8{s8 Regional Gateway}
+    end
 
-    style eMBB_Slice fill:#e0f2fe,stroke:#0ea5e9,stroke-width:2px,color:#000
-    style URLLC_Slice fill:#fee2e2,stroke:#ef4444,stroke-width:2px,color:#000
-    style mMTC_Slice fill:#dcfce7,stroke:#22c55e,stroke-width:2px,color:#000
-    style s1 fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#000
+    %% Data Center
+    subgraph Data_Center [DC Spine & Leaf Fabric]
+        s9[s9 DC Spine]
+        s10[s10 DC Leaf]
+        h1[(h1 eMBB/mMTC UPF)]
+        h14[(h14 MEC Edge Server)]
+    end
+
+    %% Infrastructure Hosts
+    h11((h11 Probe Mirror)) --> s1
+    h2[(h2 Dedicated URLLC UPF)] --> s4
+    h15((h15 NOC Monitor)) --> s8
+
+    %% Uplinks
+    RAN_A ==>|10M / 1ms| s1
+    RAN_B ==>|10M / 1ms| s3
+    RAN_C ==>|10M / 1ms| s8
+
+    %% Ring & Core Interconnects
+    s1 ===|Fast-Path 2ms| s4
+    s1 ---|Metro 2ms| s2
+    s2 ---|Metro 2ms| s3
+    s3 ---|Metro 2ms| s4
+    s1 -.->|Diagonal TE Link 6ms| s3
+    s8 --- s2
+    s8 --- s3
+
+    %% DC Interconnects
+    s2 --- s9
+    s4 --- s9
+    s9 === s10
+    s10 --> h1
+    s10 --> h14
+
+    style RAN_A fill:#e0f2fe,stroke:#0284c7,stroke-width:2px,color:#000
+    style RAN_B fill:#fef9c3,stroke:#ca8a04,stroke-width:2px,color:#000
+    style RAN_C fill:#f3e8ff,stroke:#9333ea,stroke-width:2px,color:#000
+    style Core_Ring fill:#ffedd5,stroke:#ea580c,stroke-width:2px,color:#000
+    style Data_Center fill:#f1f5f9,stroke:#475569,stroke-width:2px,color:#000
 ```
 
 ## Architecture & Slicing Design
-- **Core ring**: s1-s2-s3-s4 (10 Mbps links, `delay=2ms`)
-- **Edge aggregation**: s5 (gNodeB-A) -> s1, s6 (gNodeB-B) -> s3
-- **Paths from s5**: 
-  - SHORT `s5->s1->s4` (URLLC, via `s1-eth2`)
-  - LONG `s5->s1->s2->s3->s4` (eMBB, via `s1-eth1`)
-- **Hosts / slices**: h3,h4 -> eMBB; h5,h6 -> URLLC; h7,h8,h9 -> mMTC; h1 = eMBB UPF (s2); h2 = URLLC UPF (s4)
+- **Core ring & transit**: s1-s2-s3-s4 + s8 (Regional Gateway) (10 Mbps links, `delay=2ms`)
+- **Diagonal TE link**: s1-s3 (`delay=6ms`, used for failover & traffic engineering)
+- **DC Spine & Leaf**: s9 (Spine) -> s10 (MEC / UPF Leaf)
+- **Edge aggregation (gNodeBs)**:
+  - `s5` (gNodeB-A Suburb) -> `s1`
+  - `s6` (gNodeB-B Smart City) -> `s3`
+  - `s7` (gNodeB-C Stadium / Factory) -> `s8`
+- **Hosts & Slices (15 Hosts)**:
+  - **URLLC**: `h5`, `h6` (Cars on s5), `h12` (Robot on s7), `h2` (Dedicated URLLC UPF on s4)
+  - **eMBB**: `h3`, `h4` (Phones on s5), `h13` (AR Headset on s7), `h1` (Collector UPF on s10)
+  - **mMTC**: `h7`, `h8`, `h9` (Sensors on s6)
+  - **Mobility**: `h10` (Mobile vehicle roaming `s5` <-> `s6` <-> `s7`)
+  - **Edge & Monitoring**: `h11` (Lawful intercept probe on s1), `h14` (MEC Server on s10), `h15` (NOC Monitor on s8)
 
 
 ## Use case: slice-aware 5G transport (failover, mobility, traffic engineering, IoT quarantine)
@@ -146,82 +168,93 @@ This testbed models **5G Transport Network Slicing & Transport-Layer Management*
 | python-ryu | RYU 4.34 controller | `pip install ryu` (venv, Python 3.9) |
 | networkx / matplotlib | charts | `pip install networkx matplotlib` |
 
-RYU is installed in a virtualenv (`/home/anuruprkris/Project/ryu-env`, Python 3.9.25). Mininet lives in system python (`/usr/bin/python`); it is NOT in the venv.
+RYU and chart dependencies are installed in the local virtualenv (`.venv`). Mininet lives in system python (`/usr/bin/python3`); it is invoked directly via `sudo`.
 
 ## Repository Structure
 
 ```text
 sdn/
 ├── src/                         # Core Python modules and SDN logic
-│   ├── astra_5g_topo.py         # Mininet topology (6 switches, 9 hosts, 10 Mbps ring)
-│   ├── astra_controller.py      # RYU OpenFlow 1.3 controller app
+│   ├── astra_5g_topo.py         # Mininet 10-switch, 15-host multi-domain topology
+│   ├── astra_controller.py      # Proactive 2-table OF1.3 controller (AMF, TE, SEC, Mirror)
 │   ├── astra_qos.sh             # Linux HTB / OVS QoS configuration
 │   ├── astra_monitor.py         # Traffic monitor & DSCP analysis
 │   ├── astra_perf.py            # 4-phase slice performance benchmark
 │   └── astra_charts.py          # Topology and performance graph generation
-├── scripts/                     # Automation scripts
-│   ├── run_lab.sh               # Full environment lifecycle runner
-│   └── run_benchmark_now.sh     # Quick benchmark runner
+├── scripts/                     # Automation & feature verification scripts
+│   ├── run_usecase.sh           # Master launcher (Ryu + Mininet + QoS + Healthcheck)
+│   ├── healthcheck.sh           # Automated 12-point operational healthcheck suite
+│   ├── handover.sh              # 3-way UE roaming mobility utility (s5 <-> s6 <-> s7)
+│   ├── common.sh                # Shared helper functions (hexec, of)
+│   ├── test_failover.sh         # URLLC fast-failover validation
+│   ├── test_handover.sh         # Roaming ping validation
+│   ├── test_te.sh               # Traffic engineering diagonal route test
+│   └── test_quarantine.sh       # IoT rate-based quarantine test
+├── faults/                      # Troubleshooting incident suite (3-4 commands each)
+│   ├── TICKETS.md               # NOC incident problem statements & diagnostic hints
+│   ├── SOLUTIONS.md             # Targeted 3-4 command incident solutions
+│   ├── inject.sh                # Multi-layer fault injector (1, 2, 3, 4, all)
+│   └── verify.sh                # Automated behavioral verification per scenario
 ├── results/                     # Benchmark measurements and figures
 │   ├── astra_results.json       # Aggregate throughput & latency metrics
 │   ├── astra_monitor_output.txt # Path DSCP capture analysis
 │   └── figures/                 # Generated performance and topology plots
 ├── pcaps/                       # Packet captures (URLLC short path / eMBB long path)
-├── logs/                        # Runtime execution logs (git-ignored)
-└── docs/                        # Architecture notes and documentation
+└── logs/                        # Runtime execution logs (git-ignored)
 ```
 
 ## Running the Lab
 
-Run the commands from this repository's root directory with the privileges required by Mininet and Open vSwitch. The exact venv path is machine-specific; activate the environment where Ryu is installed.
+Run all commands from the repository's root directory with the root privileges required by Mininet and Open vSwitch.
 
-### Option A: Automated Execution
-Run the full lab benchmark automation:
+### Option A: Complete Automated Execution (Recommended)
+Launch the controller, 10-switch topology, QoS queues, and run the 12-check healthcheck suite:
 ```bash
-sudo bash scripts/run_lab.sh
-```
-Or run the standalone benchmark suite:
-```bash
-sudo bash scripts/run_benchmark_now.sh
+sudo bash scripts/run_usecase.sh
 ```
 
-### Option B: Manual Step-by-Step
+### Option B: Troubleshooting Incident Lab
+Inject an incident scenario and verify resolution after troubleshooting:
+```bash
+# 1. Inject incident 1, 2, 3, or 4
+sudo bash faults/inject.sh 1
 
-1. **Start the RYU controller** (port 6653, REST on 8080)
+# 2. Check failure state
+sudo bash faults/verify.sh 1
+
+# 3. Apply targeted 3-4 command fix (refer to faults/SOLUTIONS.md)
+
+# 4. Confirm complete resolution
+sudo bash faults/verify.sh 1
+```
+
+### Option C: Manual Step-by-Step
+
+1. **Start the Ryu controller**:
    ```bash
-   source ../ryu-env/bin/activate
-   setsid nohup ryu-manager --verbose src/astra_controller.py ryu.app.ofctl_rest > logs/ryu.log 2>&1 < /dev/null & disown
+   .venv/bin/ryu-manager src/astra_controller.py > logs/ryu.log 2>&1 &
    ```
 
-2. **Start Mininet** (detached, FIFO-driven CLI)
+2. **Start Mininet** (10 switches, 15 hosts):
    ```bash
-   mkdir -p logs
    rm -f mn_fifo && mkfifo mn_fifo
-   setsid nohup sudo python3 src/astra_5g_topo.py < mn_fifo > logs/mn.log 2>&1 & disown
-   setsid bash -c 'exec 3>mn_fifo; sleep 7200' >/dev/null 2>&1 & disown
+   nohup sudo python3 src/astra_5g_topo.py < mn_fifo > logs/mn.log 2>&1 &
+   ( exec 3>mn_fifo; sleep 86400 ) &
    ```
 
-3. **Deploy slice QoS**
+3. **Deploy slice QoS**:
    ```bash
    sudo bash src/astra_qos.sh
    ```
 
-4. **Monitor slice separation** (tcpdump + tshark)
+4. **Run End-to-End Healthcheck**:
    ```bash
-   source ../ryu-env/bin/activate
-   python3 src/astra_monitor.py
+   sudo bash scripts/healthcheck.sh
    ```
 
-5. **Run the performance benchmark**
+5. **Generate Charts & Topology Diagram**:
    ```bash
-   source ../ryu-env/bin/activate
-   sudo /home/anuruprkris/Project/ryu-env/bin/python src/astra_perf.py
-   ```
-
-6. **Generate Charts**
-   ```bash
-   source ../ryu-env/bin/activate
-   python3 src/astra_charts.py
+   .venv/bin/python src/astra_charts.py
    ```
    *Charts will be saved to `results/figures/`.*
 
