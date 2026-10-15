@@ -27,6 +27,7 @@ measure_mbps() {
 
 case "$1" in
 # ------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 # INC-1 Verification: Fast-Failover & Ring Resilience
 # ------------------------------------------------------------------------------
 1)
@@ -40,6 +41,13 @@ case "$1" in
   reach h5 10.0.0.2 && ok "h5 -> h2 survives fiber cut via backup diagonal" || bad "h5 black-holed during fiber cut"
   reach h6 10.0.0.2 && ok "h6 -> h2 survives fiber cut via backup diagonal" || bad "h6 black-holed during fiber cut"
   reach h12 10.0.0.2 && ok "Robot h12 -> h2 reaches URLLC UPF" || bad "Robot h12 cannot reach h2"
+
+  # Verify s3 transit flow uses priority queue 0 for URLLC traffic
+  if of dump-flows s3 table=1 | grep -q "nw_dst=10.0.0.2.*set_queue:0"; then
+    ok "Strict-priority queue 0 assigned on s3 transit to preserve low latency"
+  else
+    bad "Missing set_queue:0 on s3 transit route for 10.0.0.2"
+  fi
   
   echo "  Restoring primary trunk (s1-eth2 up)..."
   sudo ip link set s1-eth2 up
@@ -52,6 +60,13 @@ case "$1" in
 # ------------------------------------------------------------------------------
 2)
   echo "=== [Verify Incident 2] Mobile UE 3-Way Roaming & Downlink Routing ==="
+  # Verify Regional Gateway port 1 is administratively UP
+  if of dump-ports-desc s8 | awk '/ 1\(s8-eth1\)/{flag=1; next} / [0-9]+\(/{flag=0} flag' | grep -q "PORT_DOWN"; then
+    bad "Regional Gateway port s8-eth1 is administratively DOWN!"
+  else
+    ok "Regional Gateway port s8-eth1 is administratively UP"
+  fi
+
   reach h10 10.0.0.2 && ok "h10 reachable on gNodeB-A (s5)" || bad "h10 unreachable on s5"
   
   echo "  Executing handover to gNodeB-B (s6)..."
@@ -111,8 +126,14 @@ case "$1" in
     ok "Zero-trust verified: Sensor h7 -> URLLC UPF h2 is strictly blocked"
   fi
 
-  # Check 2: Smart Meter h9 MUST reach collector h1
-  reach h9 10.0.0.1 && ok "Sensor h9 -> UPF collector h1 reachable" || bad "Sensor h9 is silently blackholed"
+  # Check 2: Smart Meter h9 MUST NOT be choked by rogue meter band
+  if of dump-meters s6 meter=109 2>/dev/null | grep -q "rate=1 "; then
+    bad "Smart sensor h9 is starved by a rogue 1 kbps meter band on s6!"
+  elif ! reach h9 10.0.0.1; then
+    bad "Sensor h9 -> UPF collector h1 unreachable"
+  else
+    ok "Sensor h9 meter profile healthy and collector h1 reachable"
+  fi
 
   # Check 3: Lawful Intercept Probe h11 sees mirrored traffic from both cars
   for car_ip in 10.0.0.5 10.0.0.6; do
@@ -127,6 +148,15 @@ case "$1" in
       bad "Probe h11 saw nothing from $host_name (TOS/DSCP misclassified?)"
     fi
   done
+
+  # Check 4: Sensor h8 DSCP tag classification (must not be overridden by rogue goto_table)
+  if of dump-flows s6 table=0 | grep -q "priority=305,ip,nw_src=10.0.0.8"; then
+    bad "Sensor h8 DSCP 8 marking is shadowed by rogue priority 305 unclassified rule on s6!"
+  elif of dump-flows s6 table=0 | grep "nw_src=10.0.0.8" | grep -q "set_field:8->ip_dscp"; then
+    ok "Sensor h8 DSCP marking (DSCP 8 / CS1) correctly active on s6"
+  else
+    bad "Sensor h8 missing proper DSCP 8 classification on s6"
+  fi
   ;;
 
 *)
