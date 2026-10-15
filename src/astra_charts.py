@@ -14,6 +14,8 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import networkx as nx
 
+from matplotlib.lines import Line2D
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 RESULTS_DIR = BASE_DIR / 'results'
 FIGURES_DIR = RESULTS_DIR / 'figures'
@@ -106,26 +108,25 @@ def draw_topology():
 
     # Draw Switch Nodes
     nx.draw_networkx_nodes(G, pos, nodelist=['s1', 's2', 's3', 's4'],
-                           node_color='#d35400', node_size=1500, label='Core Ring (s1-s4)', ax=ax)
+                           node_color='#d35400', node_size=1500, ax=ax)
     nx.draw_networkx_nodes(G, pos, nodelist=['s8'],
-                           node_color='#b9770e', node_size=1400, label='Regional Gateway (s8)', ax=ax)
+                           node_color='#b9770e', node_size=1400, ax=ax)
     nx.draw_networkx_nodes(G, pos, nodelist=['s9', 's10'],
-                           node_color='#2c3e50', node_size=1300, label='DC Spine / Leaf (s9-s10)', ax=ax)
+                           node_color='#2c3e50', node_size=1300, ax=ax)
     nx.draw_networkx_nodes(G, pos, nodelist=['s5', 's6', 's7'],
-                           node_color='#2980b9', node_size=1400, label='RAN gNodeBs (s5-s7)', ax=ax)
+                           node_color='#2980b9', node_size=1400, ax=ax)
 
     # Draw Host Nodes by Slice / Role
     nx.draw_networkx_nodes(G, pos, nodelist=['h1', 'h2', 'h14', 'h11', 'h15'],
-                           node_color='#16a085', node_size=850, label='Servers & Probes (UPF/MEC/NOC)', ax=ax)
+                           node_color='#16a085', node_size=850, ax=ax)
     nx.draw_networkx_nodes(G, pos, nodelist=['h3', 'h4', 'h13'],
-                           node_color='#8e44ad', node_size=650, label='eMBB UEs (Phones / AR)', ax=ax)
+                           node_color='#8e44ad', node_size=650, ax=ax)
     nx.draw_networkx_nodes(G, pos, nodelist=['h5', 'h6', 'h12'],
-                           node_color='#c0392b', node_size=650, label='URLLC UEs (Cars / Robot)', ax=ax)
+                           node_color='#c0392b', node_size=650, ax=ax)
     nx.draw_networkx_nodes(G, pos, nodelist=['h7', 'h8', 'h9'],
-                           node_color='#f39c12', node_size=650, label='mMTC Sensors (Smart City)', ax=ax)
+                           node_color='#f39c12', node_size=650, ax=ax)
     nx.draw_networkx_nodes(G, pos, nodelist=['h10'],
-                           node_color='#e74c3c', node_shape='s', node_size=750,
-                           label='Mobile UE (Roams s5-s6-s7)', ax=ax)
+                           node_color='#e74c3c', node_shape='s', node_size=750, ax=ax)
 
     # Draw Edges with styled widths & colors
     nx.draw_networkx_edges(G, pos, edgelist=core_ring, width=4.5, edge_color='#2c3e50', ax=ax)
@@ -162,8 +163,30 @@ def draw_topology():
             fontsize=11, color='#c0392b', fontweight='bold',
             bbox=dict(boxstyle='round,pad=0.4', facecolor='#fdedec', edgecolor='#e74c3c', lw=1))
 
-    # Legend & Title
-    ax.legend(loc='lower left', bbox_to_anchor=(0.78, 0.72), fontsize=9, framealpha=0.9, facecolor='#f8f9f9', edgecolor='#d5dbdb')
+    # Clean Legend with dedicated Line2D proxy markers
+    legend_elements = [
+        Line2D([0], [0], marker='o', color='none', label='Core Ring (s1-s4)',
+               markerfacecolor='#d35400', markeredgecolor='#ba4a00', markersize=10),
+        Line2D([0], [0], marker='o', color='none', label='Regional Gateway (s8)',
+               markerfacecolor='#b9770e', markeredgecolor='#9a630b', markersize=10),
+        Line2D([0], [0], marker='o', color='none', label='DC Spine / Leaf (s9-s10)',
+               markerfacecolor='#2c3e50', markeredgecolor='#1b2631', markersize=10),
+        Line2D([0], [0], marker='o', color='none', label='RAN gNodeBs (s5-s7)',
+               markerfacecolor='#2980b9', markeredgecolor='#21618c', markersize=10),
+        Line2D([0], [0], marker='o', color='none', label='Servers & Probes (UPF/MEC/NOC)',
+               markerfacecolor='#16a085', markeredgecolor='#117a65', markersize=9),
+        Line2D([0], [0], marker='o', color='none', label='eMBB UEs (Phones / AR)',
+               markerfacecolor='#8e44ad', markeredgecolor='#6c3483', markersize=8),
+        Line2D([0], [0], marker='o', color='none', label='URLLC UEs (Cars / Robot)',
+               markerfacecolor='#c0392b', markeredgecolor='#922b21', markersize=8),
+        Line2D([0], [0], marker='o', color='none', label='mMTC Sensors (Smart City)',
+               markerfacecolor='#f39c12', markeredgecolor='#d68910', markersize=8),
+        Line2D([0], [0], marker='s', color='none', label='Mobile UE (Roams s5-s6-s7)',
+               markerfacecolor='#e74c3c', markeredgecolor='#c0392b', markersize=9),
+    ]
+    ax.legend(handles=legend_elements, loc='upper right', bbox_to_anchor=(0.98, 0.98),
+              fontsize=9.5, labelspacing=0.75, handletextpad=0.8, borderpad=0.8,
+              framealpha=0.95, facecolor='#f8f9f9', edgecolor='#bdc3c7')
     ax.set_title('Astra: 5G Slice-Aware SDN Transport Fabric Topology\n'
                  '10 OpenFlow 1.3 Switches (s1-s10) | 15 Hosts (h1-h15) | Multi-Domain RAN, Core Ring & DC',
                  fontsize=14, fontweight='bold', pad=15)
