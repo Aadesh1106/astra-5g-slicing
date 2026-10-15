@@ -90,6 +90,37 @@ flowchart LR
   - LONG `s5->s1->s2->s3->s4` (eMBB, via `s1-eth1`)
 - **Hosts / slices**: h3,h4 -> eMBB; h5,h6 -> URLLC; h7,h8,h9 -> mMTC; h1 = eMBB UPF (s2); h2 = URLLC UPF (s4)
 
+
+## Use case: slice-aware 5G transport (failover, mobility, traffic engineering, IoT quarantine)
+
+Topology additions over the base lab: **h10** (mobile car that hands over between gNodeB-A `s5` and gNodeB-B `s6`), **h11** (monitoring probe on `s1`), and a **diagonal core link s1-s3**.
+
+The controller (`src/astra_controller.py`) is fully **proactive** (no MAC learning, no flooding, no STP) with a two-table OpenFlow 1.3 pipeline, BFS-computed routes, and four control-plane functions:
+
+| Function | What happens |
+|---|---|
+| Slice pipeline | Table 0: ACLs (slice isolation), per-phone meters (4 Mbps), DSCP marking (46/34/8). Table 1: routing; `s1` routes by slice using DSCP->metadata |
+| URLLC failover | Fast-failover group on `s1` (short path `s1-eth2`, backup via diagonal) and on `s4` for the downlink |
+| URLLC mirroring | `s1` copies URLLC packets to the probe h11 |
+| Mobility (AMF) | `scripts/handover.sh s6` moves h10's port to `s6`; the controller reacts to PORT_STATUS and rewrites h10's routes on all switches |
+| Traffic engineering | Port stats on `s1`; if the eMBB path exceeds 3 Mbps, phone h4 is moved onto the diagonal (reverts below 2 Mbps) |
+| IoT quarantine | Per-sensor packet rate on `s6`; a sensor above 200 pps gets a 30 s drop rule |
+
+```bash
+sudo bash scripts/run_usecase.sh        # controller + topology + queues + healthcheck
+sudo bash scripts/healthcheck.sh        # 10 checks, PASS/FAIL
+sudo bash scripts/test_failover.sh      # cut s1<->s4, URLLC moves to the diagonal
+sudo bash scripts/test_handover.sh      # h10 s5 -> s6 -> s5
+sudo bash scripts/test_te.sh            # two phones saturate eMBB, h4 is rerouted
+sudo bash scripts/test_quarantine.sh    # sensor h8 floods, gets quarantined
+sudo ovs-ofctl -O OpenFlow13 dump-flows s1
+sudo bash faults/inject.sh 1            # troubleshooting incident 1..4 or all (symptoms: faults/TICKETS.md)
+sudo bash faults/verify.sh 1            # behavioural check that incident 1 is really fixed
+```
+**Troubleshooting incidents** (`faults/`): four compound scenarios, each with several root causes at different layers (groups, stale flows, meters/interfaces/queues, security policy) and **3 fix commands + a verify run** each. Tickets give symptoms only; `faults/SOLUTIONS.md` has the walkthrough.
+
+Set `RYU_BIN=/path/to/venv/bin/ryu-manager` if Ryu is in a virtualenv. Controller events are logged with `[AMF]`, `[TE]`, `[SEC]`, `[LINK]`, `[ACL]` prefixes in `logs/ryu.log`.
+
 ## Known Scope
 QoS enforcement in this lab is uplink-only (UE→UPF); downlink is out of scope.
 
