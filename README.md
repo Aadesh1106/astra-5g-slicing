@@ -2,9 +2,9 @@
 
 ![Astra 5G topology](results/figures/astra_5g_topology.png)
 
-# Astra Mobility 5G SDN Slicing Lab
+# Astra: SDN-Enabled 5G Transport Slicing & Mobility Fabric
 
-### Reproducible 5G mobility and network-slicing experiments
+### Proactive OpenFlow 1.3 SDN testbed emulating 5G transport slicing (eMBB, URLLC, mMTC) with sub-15ms fast failover, mobility handover, and fault-injection diagnostics
 
 [![Python](https://img.shields.io/badge/Python-3.9%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](src/astra_5g_topo.py)
 [![Mininet](https://img.shields.io/badge/Mininet-network%20emulation-7B2CBF?style=for-the-badge)](src/astra_5g_topo.py)
@@ -17,13 +17,13 @@
   <a href="#architecture--slicing-design">Topology</a> ·
   <a href="#running-the-lab">Run the lab</a> ·
   <a href="#observed-results-performance">Results</a> ·
-  <a href="#known-scope">Scope</a>
+  <a href="#known-scope">Scope & Emulation Model</a>
 </p>
 
 </div>
 
-Mininet + Open vSwitch + RYU network slicing lab emulating a 5G core fabric.
-Three slices (eMBB / URLLC / mMTC) share one physical ring with slice-specific routing, queuing, and rate-limiting.
+Mininet + Open vSwitch + Ryu SDN lab emulating a **5G transport network fabric**.
+Three standardized 3GPP slice traffic classes (eMBB, URLLC, mMTC) share one physical ring with slice-specific routing, queuing, rate-limiting, and proactive fast failover.
 
 ```mermaid
 flowchart LR
@@ -121,8 +121,19 @@ sudo bash faults/verify.sh 1            # behavioural check that incident 1 is r
 
 Set `RYU_BIN=/path/to/venv/bin/ryu-manager` if Ryu is in a virtualenv. Controller events are logged with `[AMF]`, `[TE]`, `[SEC]`, `[LINK]`, `[ACL]` prefixes in `logs/ryu.log`.
 
-## Known Scope
-QoS enforcement in this lab is uplink-only (UE→UPF); downlink is out of scope.
+## Known Scope & Emulation Model
+
+This testbed models **5G Transport Network Slicing & Transport-Layer Management**, not an over-the-air 3GPP cellular stack:
+- **What is emulated**:
+  - Transport-layer slice segregation matching 3GPP service categories: **eMBB** (high throughput), **URLLC** (bounded ultra-low latency, sub-15ms), and **mMTC** (massive sensor rate-limiting).
+  - SDN-based transport gateways: gNodeB edge ingress (`s5`, `s6`) and User Plane Functions (eMBB UPF `h1`, URLLC UPF `h2`).
+  - Transport-layer mobility management (AMF port-status event triggers rehoming UE L2/L3 routes across base stations).
+  - Dynamic traffic engineering, QoS metering (OVS OpenFlow meters & Linux HTB queues), and IoT isolation.
+- **What is out of scope (architectural boundaries)**:
+  - Radio Access Network (no 3GPP NR/LTE PHY or MAC wireless layers, RF propagation, or PRB scheduling).
+  - Cellular control protocols (no 3GPP NAS, NGAP/SCTP, or PFCP signaling; OpenFlow 1.3 is used for control).
+  - Packet encapsulation: Ethernet/IP packet framing with static ARP is used rather than GTP-U tunnels.
+  - QoS enforcement in this lab is focused on uplink transport (UE → UPF).
 
 ## Prerequisites & Installation (Arch Linux)
 
