@@ -11,7 +11,14 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import networkx as nx
 
-OUT = '/home/anuruprkris/Project/sdn'
+import os
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+RESULTS_DIR = BASE_DIR / 'results'
+FIGURES_DIR = RESULTS_DIR / 'figures'
+FIGURES_DIR.mkdir(parents=True, exist_ok=True)
+OUT = str(FIGURES_DIR)
 
 
 def draw_topology():
@@ -87,7 +94,8 @@ def draw_topology():
 
 
 def draw_performance():
-    with open('astra_results.json') as f:
+    json_path = RESULTS_DIR / 'astra_results.json'
+    with open(json_path) as f:
         r = json.load(f)
 
     phase_keys = ['baseline', 'rate_limited', 'priority_qos', 'full_contention']

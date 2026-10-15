@@ -251,6 +251,14 @@ if __name__ == '__main__':
         
         final_results[phase] = aggregate_results(samples)
         
-    with open('astra_results.json', 'w') as f:
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+    results_dir = os.path.join(project_root, 'results')
+
+    os.makedirs(results_dir, exist_ok=True)
+
+
+    out_file = os.path.join(results_dir, 'astra_results.json')
+
+    with open(out_file, 'w') as f:
         json.dump(final_results, f, indent=2)
-    print("\nResults saved to astra_results.json")
+    print(f"\nResults saved to {out_file}")

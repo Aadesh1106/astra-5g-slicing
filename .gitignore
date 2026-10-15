@@ -14,5 +14,10 @@ __pycache__/
 .vscode/
 .claude/
 
+# Runtime logs & fifos
+*.log
+logs/
+mn_fifo
+
 RESULTS.md
 docs/

@@ -9,10 +9,18 @@ import time
 import json
 
 
+import os
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+PCAPS_DIR = BASE_DIR / "pcaps"
+PCAPS_DIR.mkdir(parents=True, exist_ok=True)
+
+
 class AstraMonitor:
     def __init__(self):
-        self.pcap_short = "astra_short_path.pcap"   # s1-eth2: s1->s4
-        self.pcap_long = "astra_long_path.pcap"     # s1-eth1: s1->s2
+        self.pcap_short = str(PCAPS_DIR / "astra_short_path.pcap")   # s1-eth2: s1->s4
+        self.pcap_long = str(PCAPS_DIR / "astra_long_path.pcap")     # s1-eth1: s1->s2
 
     def start_captures(self, duration=30):
         print(f"\n[{'='*60}]")

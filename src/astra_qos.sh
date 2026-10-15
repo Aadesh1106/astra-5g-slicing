@@ -23,7 +23,7 @@ sudo ovs-vsctl --all destroy Queue 2>/dev/null || true
 
 # ============================================
 # HTB Queues on SHORT path (s1->s4)
-# Queue 0: URLLC - strict priority, 50% min guarantee
+# Queue 0: URLLC - strict priority
 # Queue 1: mMTC   - best effort
 # ============================================
 echo "[1] Configuring SHORT path (s1->s4) for URLLC priority..."

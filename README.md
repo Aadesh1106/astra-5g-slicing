@@ -1,16 +1,16 @@
 <div align="center">
 
-![Astra 5G topology](astra_5g_topology.png)
+![Astra 5G topology](results/figures/astra_5g_topology.png)
 
 # Astra Mobility 5G SDN Slicing Lab
 
 ### Reproducible 5G mobility and network-slicing experiments
 
-[![Python](https://img.shields.io/badge/Python-3.9%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](astra_5g_topo.py)
-[![Mininet](https://img.shields.io/badge/Mininet-network%20emulation-7B2CBF?style=for-the-badge)](astra_5g_topo.py)
-[![Open vSwitch](https://img.shields.io/badge/Open%20vSwitch-3.7%2B-2D6A4F?style=for-the-badge)](astra_qos.sh)
-[![Ryu](https://img.shields.io/badge/Ryu-SDN%20controller-E76F51?style=for-the-badge)](astra_controller.py)
-[![iperf3](https://img.shields.io/badge/iperf3-benchmark-F4A261?style=for-the-badge)](astra_perf.py)
+[![Python](https://img.shields.io/badge/Python-3.9%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](src/astra_5g_topo.py)
+[![Mininet](https://img.shields.io/badge/Mininet-network%20emulation-7B2CBF?style=for-the-badge)](src/astra_5g_topo.py)
+[![Open vSwitch](https://img.shields.io/badge/Open%20vSwitch-3.7%2B-2D6A4F?style=for-the-badge)](src/astra_qos.sh)
+[![Ryu](https://img.shields.io/badge/Ryu-SDN%20controller-E76F51?style=for-the-badge)](src/astra_controller.py)
+[![iperf3](https://img.shields.io/badge/iperf3-benchmark-F4A261?style=for-the-badge)](src/astra_perf.py)
 [![Research lab](https://img.shields.io/badge/type-research%20lab-264653?style=for-the-badge)](#known-scope)
 
 <p>
@@ -106,53 +106,82 @@ QoS enforcement in this lab is uplink-only (UE→UPF); downlink is out of scope.
 
 RYU is installed in a virtualenv (`/home/anuruprkris/Project/ryu-env`, Python 3.9.25). Mininet lives in system python (`/usr/bin/python`); it is NOT in the venv.
 
-## Project Files
+## Repository Structure
 
-| File | Role |
-|---|---|
-| `astra_5g_topo.py` | Mininet topology (6 switches, 9 hosts, 10 Mbps ring). Run with system python. |
-| `astra_controller.py` | RYU app: table-miss, ARP flood, MAC learning, slice-aware reactive priorities. |
-| `astra_qos.sh` | Full QoS deployment: HTB queues, meter 100, DSCP/set-queue flows. |
-| `astra_monitor.py` | Captures `s1-eth2`/`s1-eth1` with tcpdump, DSCP analysis with tshark, OVS/RYU stats. |
-| `astra_perf.py` | 4-phase benchmark (baseline / rate-limited / priority QoS / full contention) via host namespaces. |
-| `astra_charts.py` | Generates topology + performance PNGs. |
-| `astra_results.json` | Stores the throughput and latency results from the performance benchmark. |
-| `astra_monitor_output.txt`| Captures the DSCP monitoring stats (Short path vs Long path). |
+```text
+sdn/
+├── src/                         # Core Python modules and SDN logic
+│   ├── astra_5g_topo.py         # Mininet topology (6 switches, 9 hosts, 10 Mbps ring)
+│   ├── astra_controller.py      # RYU OpenFlow 1.3 controller app
+│   ├── astra_qos.sh             # Linux HTB / OVS QoS configuration
+│   ├── astra_monitor.py         # Traffic monitor & DSCP analysis
+│   ├── astra_perf.py            # 4-phase slice performance benchmark
+│   └── astra_charts.py          # Topology and performance graph generation
+├── scripts/                     # Automation scripts
+│   ├── run_lab.sh               # Full environment lifecycle runner
+│   └── run_benchmark_now.sh     # Quick benchmark runner
+├── results/                     # Benchmark measurements and figures
+│   ├── astra_results.json       # Aggregate throughput & latency metrics
+│   ├── astra_monitor_output.txt # Path DSCP capture analysis
+│   └── figures/                 # Generated performance and topology plots
+├── pcaps/                       # Packet captures (URLLC short path / eMBB long path)
+├── logs/                        # Runtime execution logs (git-ignored)
+└── docs/                        # Architecture notes and documentation
+```
 
 ## Running the Lab
 
 Run the commands from this repository's root directory with the privileges required by Mininet and Open vSwitch. The exact venv path is machine-specific; activate the environment where Ryu is installed.
 
+### Option A: Automated Execution
+Run the full lab benchmark automation:
+```bash
+sudo bash scripts/run_lab.sh
+```
+Or run the standalone benchmark suite:
+```bash
+sudo bash scripts/run_benchmark_now.sh
+```
+
+### Option B: Manual Step-by-Step
+
 1. **Start the RYU controller** (port 6653, REST on 8080)
    ```bash
    source ../ryu-env/bin/activate
-   setsid nohup ryu-manager --verbose astra_controller.py ryu.app.ofctl_rest > ryu.log 2>&1 < /dev/null & disown
+   setsid nohup ryu-manager --verbose src/astra_controller.py ryu.app.ofctl_rest > logs/ryu.log 2>&1 < /dev/null & disown
    ```
+
 2. **Start Mininet** (detached, FIFO-driven CLI)
    ```bash
+   mkdir -p logs
    rm -f mn_fifo && mkfifo mn_fifo
-   setsid nohup python astra_5g_topo.py < mn_fifo > mn.log 2>&1 & disown
+   setsid nohup sudo python3 src/astra_5g_topo.py < mn_fifo > logs/mn.log 2>&1 & disown
    setsid bash -c 'exec 3>mn_fifo; sleep 7200' >/dev/null 2>&1 & disown
    ```
+
 3. **Deploy slice QoS**
    ```bash
-   bash astra_qos.sh
+   sudo bash src/astra_qos.sh
    ```
+
 4. **Monitor slice separation** (tcpdump + tshark)
    ```bash
    source ../ryu-env/bin/activate
-   python astra_monitor.py
+   python3 src/astra_monitor.py
    ```
+
 5. **Run the performance benchmark**
    ```bash
    source ../ryu-env/bin/activate
-   python astra_perf.py
+   sudo /home/anuruprkris/Project/ryu-env/bin/python src/astra_perf.py
    ```
+
 6. **Generate Charts**
    ```bash
    source ../ryu-env/bin/activate
-   python astra_charts.py
+   python3 src/astra_charts.py
    ```
+   *Charts will be saved to `results/figures/`.*
 
 ## Observed Results (Performance)
 

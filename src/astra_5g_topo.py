@@ -99,7 +99,6 @@ def run():
     for sw in net.switches:
         info(f"  {sw.name}: {sw.dpid}\n")
 
-    info("\n*** Starting CLI:\n")
     CLI(net)
     net.stop()
 
