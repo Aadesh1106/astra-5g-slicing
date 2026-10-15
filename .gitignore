@@ -21,3 +21,8 @@ mn_fifo
 
 RESULTS.md
 docs/
+
+# Virtual Environments
+.venv/
+venv/
+ryu-env/
