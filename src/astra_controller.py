@@ -1,318 +1,398 @@
 #!/usr/bin/env python3
 """
-Astra Mobility 5G SDN Controller  (RYU, OpenFlow 1.3)
+Astra Mobility: 5G SDN Controller (Ryu, OpenFlow 1.3)
 
-Use case: slice-aware 5G transport with URLLC fast failover, mobility,
-traffic engineering and IoT quarantine.
-
-Proactive two-table pipeline (no reactive learning, no flooding):
-
-  Table 0  CLASSIFY / ACL / MARK
-      - slice-isolation ACLs                                       [s5, s6]
-      - eMBB: per-phone meter (4 Mbps) + DSCP 34 (AF41)            [s5]
-      - URLLC: DSCP 46 (EF)                                        [s5, s6 for the mobile car]
-      - mMTC: DSCP 8 (CS1)                                         [s6]
-      - s1 reads the DSCP back into metadata
-  Table 1  FORWARD
-      - s1: URLLC -> fast-failover group (short path, backup = diagonal)
-            + MIRROR copy to the probe h11 (port 5)
-      - everything else: shortest-path routing computed by BFS over LINKS
-
-Control-plane functions (this file):
-  F-AMF  Mobility    : PORT_STATUS on the mobile ports re-homes h10 and rewrites
-                       its downlink routes on every switch (handover).
-  F-TE   Traffic eng.: s1 port stats; if the eMBB path is saturated, phone h4 is
-                       moved onto the diagonal s1-s3 path (hysteresis).
-  F-SEC  Quarantine  : s6 per-sensor packet rate; a flooding sensor gets a
-                       temporary drop rule (hard timeout).
-
-Flow cookies: 0x1 plumbing, 0x2 ACL, 0x3 marking, 0x4 routing, 0x5 quarantine,
-0x6 traffic-engineering override.
+Architecture:
+  - 10 Switches (s1-s4 Core Ring, s8 Regional Gateway, s9-s10 DC Spine/Leaf, s5-s7 RAN Edge)
+  - 15 Hosts (URLLC V2X, eMBB 4K/AR, mMTC IoT, MEC Edge Server, UPFs)
+  - Proactive Two-Table OpenFlow Pipeline:
+      Table 0: Slice Classification, DSCP Marking, Ingress Meters, Zero-Trust ACLs
+      Table 1: Destination Forwarding (BFS Shortest Path), Fast-Failover Groups, Probe Mirror
+  - Dynamic Control Plane Functions:
+      F-AMF: 3-way UE Mobility Handover across gNodeBs (s5 <-> s6 <-> s7)
+      F-TE : Traffic Engineering to divert eMBB onto diagonal when congested
+      F-SEC: Automatic rate-based quarantine of abusive IoT sensors
 """
 
 import time
-
 from ryu.base import app_manager
 from ryu.controller import ofp_event
 from ryu.controller.handler import set_ev_cls, MAIN_DISPATCHER, CONFIG_DISPATCHER
 from ryu.ofproto import ofproto_v1_3
 from ryu.lib import hub
 
-T_CLASSIFY, T_FORWARD = 0, 1
+# Flow Tables
+T_CLASSIFY = 0
+T_FORWARD  = 1
 
-# --- slices ------------------------------------------------------------------
-H1, H2 = '10.0.0.1', '10.0.0.2'          # eMBB / mMTC-collector UPF, URLLC UPF
-EMBB_UE = ['10.0.0.3', '10.0.0.4']
-URLLC_UE = ['10.0.0.5', '10.0.0.6', '10.0.0.10']   # .10 = mobile car
-MMTC_UE = ['10.0.0.7', '10.0.0.8', '10.0.0.9']
-MOBILE_UE = '10.0.0.10'
-PHONE_TE = '10.0.0.4'                    # the phone moved by traffic engineering
+# Slice Endpoints
+H1, H2 = '10.0.0.1', '10.0.0.2'                     # UPF eMBB/mMTC, UPF URLLC
+EMBB_UE   = ['10.0.0.3', '10.0.0.4', '10.0.0.13']    # Phones + AR Headset
+URLLC_UE  = ['10.0.0.5', '10.0.0.6', '10.0.0.10', '10.0.0.12'] # Cars + Industrial Robot
+MMTC_UE   = ['10.0.0.7', '10.0.0.8', '10.0.0.9']     # Sensors
+MOBILE_UE = '10.0.0.10'                             # Mobile Car (roams s5 <-> s6 <-> s7)
+PHONE_TE  = '10.0.0.4'                              # Phone dynamically steered by TE
+PROBE_PORT = 5                                      # Mirror probe on s1 (port 5 -> h11)
 
+# QoS Metadata & DSCP Tags
 META = {'embb': 1, 'urllc': 2}
 DSCP = {'embb': 34, 'urllc': 46, 'mmtc': 8}
+
+# Rate Limits & Fast Failover IDs
 METER_EMBB_KBPS = 4000
-METER_ID = {'10.0.0.3': 100, '10.0.0.4': 101}   # one meter per phone
-GROUP_URLLC_UP = 1       # s1: UE -> URLLC UPF (short path, backup via diagonal)
-GROUP_URLLC_DOWN = 2     # s4: URLLC UPF -> UE (direct, backup via s3)
-PROBE_PORT = 5           # s1 port to the monitoring probe h11
+METER_ID = {'10.0.0.3': 100, '10.0.0.4': 101, '10.0.0.13': 102}
+GROUP_URLLC_UP   = 1    # s1: Uplink fast-failover (short path -> backup diagonal)
+GROUP_URLLC_DOWN = 2    # s4: Downlink fast-failover (short path -> backup via s3)
 
-# --- tunables ------------------------------------------------------------------
-POLL_S = 5
-TE_HIGH_MBPS = 3.0       # s1-eth1 above this -> reroute PHONE_TE
-TE_LOW_MBPS = 2.0        # combined eMBB below this -> revert
-QUARANTINE_PPS = 200     # one sensor above this -> quarantine
-QUARANTINE_S = 30
+# Operational Thresholds
+POLL_INTERVAL   = 5
+TE_HIGH_MBPS    = 3.0   # Congestion trigger: reroute PHONE_TE
+TE_LOW_MBPS     = 2.0   # Recovery trigger: restore PHONE_TE
+QUARANTINE_PPS  = 200   # IoT DDoS trigger rate
+QUARANTINE_SECS = 30    # Temporary quarantine drop duration
 
-# --- topology knowledge (matches astra_5g_topo.py) -------------------------------
-LINKS = {   # switch -> {port: neighbour switch}
-    1: {1: 2, 2: 4, 3: 5, 4: 3},
-    2: {1: 1, 2: 3},
-    3: {1: 2, 2: 4, 3: 6, 4: 1},
-    4: {1: 3, 2: 1},
-    5: {1: 1},
-    6: {1: 3},
+# Network Topology Graph: switch -> {local_port: remote_switch}
+LINKS = {
+    1:  {1: 2, 2: 4, 3: 5, 4: 3},
+    2:  {1: 1, 2: 3, 3: 8, 4: 9},
+    3:  {1: 2, 2: 4, 3: 6, 4: 1, 5: 8},
+    4:  {1: 3, 2: 1, 4: 9},
+    5:  {1: 1},
+    6:  {1: 3},
+    7:  {1: 8},
+    8:  {1: 7, 2: 2, 3: 3},
+    9:  {1: 2, 2: 4, 3: 10},
+    10: {1: 9},
 }
-ATTACH = {   # host ip -> (switch, port)
-    H1: (2, 3), H2: (4, 3),
-    '10.0.0.3': (5, 2), '10.0.0.4': (5, 3), '10.0.0.5': (5, 4), '10.0.0.6': (5, 5),
-    '10.0.0.7': (6, 2), '10.0.0.8': (6, 3), '10.0.0.9': (6, 4),
-    MOBILE_UE: (5, 6),       # changes on handover
+
+# Initial Host Attachments: host_ip -> (switch_id, switch_port)
+ATTACH = {
+    '10.0.0.1':  (10, 2),  # h1  (UPF eMBB / mMTC)
+    '10.0.0.2':  (4,  3),  # h2  (UPF URLLC)
+    '10.0.0.3':  (5,  2),  # h3  (eMBB phone 1)
+    '10.0.0.4':  (5,  3),  # h4  (eMBB phone 2)
+    '10.0.0.5':  (5,  4),  # h5  (URLLC car 1)
+    '10.0.0.6':  (5,  5),  # h6  (URLLC car 2)
+    '10.0.0.7':  (6,  2),  # h7  (mMTC sensor 1)
+    '10.0.0.8':  (6,  3),  # h8  (mMTC sensor 2)
+    '10.0.0.9':  (6,  4),  # h9  (mMTC sensor 3)
+    '10.0.0.10': (5,  6),  # h10 (Mobile Car, hands over s5 <-> s6 <-> s7)
+    '10.0.0.11': (1,  5),  # h11 (Probe mirror)
+    '10.0.0.12': (7,  2),  # h12 (URLLC robot)
+    '10.0.0.13': (7,  3),  # h13 (eMBB AR headset)
+    '10.0.0.14': (10, 3),  # h14 (MEC Edge Server)
+    '10.0.0.15': (8,  4),  # h15 (NOC OAM Monitor)
 }
-MOBILE_PORT = {5: 6, 6: 5}   # switch -> port where the mobile UE can attach
+
+# Mobile UE Attachment Ports across gNodeBs
+MOBILE_PORTS = {5: 6, 6: 5, 7: 4}
 
 
 class Astra5GController(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
     def __init__(self, *args, **kwargs):
-        super(Astra5GController, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
         self.datapaths = {}
         self.attach = dict(ATTACH)
         self.te_active = False
-        self.last_tx = {}        # (dpid, port) -> (time, bytes)
-        self.last_pkts = {}      # (dpid, src ip) -> (time, pkts)
-        self.quarantined = {}    # src ip -> expiry time
-        hub.spawn(self._monitor)
+        self.last_tx = {}       # (dpid, port) -> (time, tx_bytes)
+        self.last_pkts = {}     # (dpid, src_ip) -> (time, pkt_count)
+        self.quarantined = {}   # src_ip -> expiry_timestamp
+        hub.spawn(self._monitoring_loop)
 
-    # ------------------------------------------------------------------ helpers
-    def _flow(self, dp, table, prio, match, actions=None, goto=None, meter=None,
-              write_meta=None, cookie=0x1, hard_timeout=0):
-        ofp, p = dp.ofproto, dp.ofproto_parser
+    # =========================================================================
+    # OpenFlow Helper Functions
+    # =========================================================================
+    def _add_flow(self, dp, table, prio, match, actions=None, goto=None,
+                  meter=None, write_meta=None, cookie=0x1, hard_timeout=0):
+        """Install a flow rule with optional actions, meters, metadata, and goto."""
+        ofp, parser = dp.ofproto, dp.ofproto_parser
         inst = []
         if meter:
-            inst.append(p.OFPInstructionMeter(meter))
+            inst.append(parser.OFPInstructionMeter(meter))
         if actions:
-            inst.append(p.OFPInstructionActions(ofp.OFPIT_APPLY_ACTIONS, actions))
+            inst.append(parser.OFPInstructionActions(ofp.OFPIT_APPLY_ACTIONS, actions))
         if write_meta is not None:
-            inst.append(p.OFPInstructionWriteMetadata(write_meta, 0xffffffffffffffff))
+            inst.append(parser.OFPInstructionWriteMetadata(write_meta, 0xffffffffffffffff))
         if goto is not None:
-            inst.append(p.OFPInstructionGotoTable(goto))
-        dp.send_msg(p.OFPFlowMod(datapath=dp, table_id=table, priority=prio,
-                                 match=match, instructions=inst, cookie=cookie,
-                                 hard_timeout=hard_timeout))
+            inst.append(parser.OFPInstructionGotoTable(goto))
 
-    def _ip(self, p, **kw):
-        return p.OFPMatch(eth_type=0x0800, **kw)
+        mod = parser.OFPFlowMod(
+            datapath=dp, table_id=table, priority=prio, match=match,
+            instructions=inst, cookie=cookie, hard_timeout=hard_timeout
+        )
+        dp.send_msg(mod)
 
-    def _out(self, p, port, queue=None):
+    def _ip_match(self, parser, **kwargs):
+        """Shortcut to create an IPv4 packet match."""
+        return parser.OFPMatch(eth_type=0x0800, **kwargs)
+
+    def _out_actions(self, parser, port, queue=None):
+        """Shortcut to create output actions with optional queue."""
         acts = []
         if queue is not None:
-            acts.append(p.OFPActionSetQueue(queue))
-        acts.append(p.OFPActionOutput(port))
+            acts.append(parser.OFPActionSetQueue(queue))
+        acts.append(parser.OFPActionOutput(port))
         return acts
 
-    def _route(self, sw, ip):
-        """Output port on `sw` toward host `ip` (shortest path, lowest port on ties)."""
-        att = self.attach.get(ip)
-        if att is None:
+    # =========================================================================
+    # Shortest Path Routing (BFS)
+    # =========================================================================
+    def _calculate_next_hop(self, sw_id, dst_ip):
+        """Compute the next-hop port on sw_id towards dst_ip using BFS."""
+        target = self.attach.get(dst_ip)
+        if not target:
             return None
-        if sw == att[0]:
-            return att[1]
-        dist, todo = {att[0]: 0}, [att[0]]
-        for cur in todo:                       # BFS from the destination switch
-            for nb in LINKS[cur].values():
-                if nb not in dist:
-                    dist[nb] = dist[cur] + 1
-                    todo.append(nb)
-        best = [port for port, nb in sorted(LINKS[sw].items()) if dist.get(nb, 99) == dist[sw] - 1]
-        return best[0] if best else None
+        dst_sw, dst_port = target
+        if sw_id == dst_sw:
+            return dst_port
 
-    def _install_route(self, dp, ip):
-        p = dp.ofproto_parser
-        # s4 -> phones/cars on gNodeB-A: fast-failover group instead of a single port
-        if dp.id == 4 and self.attach[ip][0] == 5:
-            acts = [p.OFPActionGroup(GROUP_URLLC_DOWN)]
+        # Breadth-First Search backward from destination switch
+        distance = {dst_sw: 0}
+        queue = [dst_sw]
+        while queue:
+            curr = queue.pop(0)
+            for port, neighbor in LINKS.get(curr, {}).items():
+                if neighbor not in distance:
+                    distance[neighbor] = distance[curr] + 1
+                    queue.append(neighbor)
+
+        # Pick neighbor on sw_id that gets us 1 step closer to destination
+        best_ports = [
+            p for p, n in sorted(LINKS.get(sw_id, {}).items())
+            if distance.get(n, 999) == distance.get(sw_id, 999) - 1
+        ]
+        return best_ports[0] if best_ports else None
+
+    def _install_route(self, dp, dst_ip):
+        """Program proactive Table 1 forwarding rule on datapath dp towards dst_ip."""
+        parser = dp.ofproto_parser
+        # s4 to gNodeB-A hosts: use downlink fast-failover group
+        if dp.id == 4 and self.attach[dst_ip][0] == 5:
+            acts = [parser.OFPActionGroup(GROUP_URLLC_DOWN)]
         else:
-            port = self._route(dp.id, ip)
+            port = self._calculate_next_hop(dp.id, dst_ip)
             if port is None:
                 return
-            acts = self._out(p, port)
-        self._flow(dp, T_FORWARD, 100, self._ip(p, ipv4_dst=ip), actions=acts, cookie=0x4)
+            acts = self._out_actions(parser, port)
 
-    # ------------------------------------------------------------ switch bring-up
+        self._add_flow(dp, T_FORWARD, 100, self._ip_match(parser, ipv4_dst=dst_ip),
+                       actions=acts, cookie=0x4)
+
+    # =========================================================================
+    # Switch Initialization & Pipeline Setup
+    # =========================================================================
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
         dp = ev.msg.datapath
-        ofp, p = dp.ofproto, dp.ofproto_parser
+        ofp, parser = dp.ofproto, dp.ofproto_parser
         self.datapaths[dp.id] = dp
-        self.logger.info("[Astra] s%d up - installing proactive pipeline", dp.id)
+        self.logger.info("[Fabric] Switch s%d connected -> Initializing OpenFlow 1.3 pipeline", dp.id)
 
-        dp.send_msg(p.OFPFlowMod(datapath=dp, table_id=ofp.OFPTT_ALL,
-                                 command=ofp.OFPFC_DELETE, out_port=ofp.OFPP_ANY,
-                                 out_group=ofp.OFPG_ANY, match=p.OFPMatch()))
-        dp.send_msg(p.OFPGroupMod(datapath=dp, command=ofp.OFPGC_DELETE,
-                                  group_id=ofp.OFPG_ALL))
-        dp.send_msg(p.OFPMeterMod(datapath=dp, command=ofp.OFPMC_DELETE,
-                                  flags=0, meter_id=ofp.OFPM_ALL))
+        # Clear existing flows, groups, and meters
+        dp.send_msg(parser.OFPFlowMod(dp, table_id=ofp.OFPTT_ALL, command=ofp.OFPFC_DELETE,
+                                      out_port=ofp.OFPP_ANY, out_group=ofp.OFPG_ANY))
+        dp.send_msg(parser.OFPGroupMod(dp, command=ofp.OFPGC_DELETE, group_id=ofp.OFPG_ALL))
+        dp.send_msg(parser.OFPMeterMod(dp, command=ofp.OFPMC_DELETE, flags=0, meter_id=ofp.OFPM_ALL))
 
-        self._flow(dp, T_CLASSIFY, 0, p.OFPMatch(), goto=T_FORWARD)
-        self._flow(dp, T_FORWARD, 0, p.OFPMatch(), actions=[])       # default: drop
+        # Default table actions: Table 0 -> Table 1; Table 1 -> Drop unknown
+        self._add_flow(dp, T_CLASSIFY, 0, parser.OFPMatch(), goto=T_FORWARD)
+        self._add_flow(dp, T_FORWARD,  0, parser.OFPMatch(), actions=[])
 
-        {1: self._setup_s1, 3: self._setup_s3, 4: self._setup_s4,
-         5: self._setup_s5, 6: self._setup_s6}.get(dp.id, lambda d: None)(dp)
+        # Apply switch-specific pipelines
+        setup_methods = {
+            1: self._setup_s1,
+            3: self._setup_s3,
+            4: self._setup_s4,
+            5: self._setup_s5,
+            6: self._setup_s6,
+            7: self._setup_s7,
+            10: self._setup_s10,
+        }
+        if dp.id in setup_methods:
+            setup_methods[dp.id](dp)
 
-        for ip in self.attach:
-            self._install_route(dp, ip)
+        # Install proactive routing to all 15 hosts
+        for host_ip in self.attach:
+            self._install_route(dp, host_ip)
 
-    # ---- s5 / gNodeB-A: ACL + marking + per-phone meters ---------------------
+    # -------------------------------------------------------------------------
+    # Edge Switch Pipelines: s5 (gNodeB-A Suburb), s6 (gNodeB-B), s7 (gNodeB-C)
+    # -------------------------------------------------------------------------
     def _setup_s5(self, dp):
-        ofp, p = dp.ofproto, dp.ofproto_parser
-        for ue in EMBB_UE:                      # phones may not reach the URLLC UPF
-            self._flow(dp, T_CLASSIFY, 400, self._ip(p, ipv4_src=ue, ipv4_dst=H2),
-                       actions=[], cookie=0x2)
-        for ue in URLLC_UE:                     # cars may not reach the eMBB UPF
-            self._flow(dp, T_CLASSIFY, 400, self._ip(p, ipv4_src=ue, ipv4_dst=H1),
-                       actions=[], cookie=0x2)
+        """gNodeB-A: Slice ACLs, DSCP classification, and per-phone eMBB meters."""
+        ofp, parser = dp.ofproto, dp.ofproto_parser
+        # Slice Boundary ACLs
+        for phone in ['10.0.0.3', '10.0.0.4']:
+            self._add_flow(dp, T_CLASSIFY, 400, self._ip_match(parser, ipv4_src=phone, ipv4_dst=H2),
+                           actions=[], cookie=0x2)
+        for car in ['10.0.0.5', '10.0.0.6', MOBILE_UE]:
+            self._add_flow(dp, T_CLASSIFY, 400, self._ip_match(parser, ipv4_src=car, ipv4_dst=H1),
+                           actions=[], cookie=0x2)
 
-        for ue in EMBB_UE:
-            mid = METER_ID[ue]
-            dp.send_msg(p.OFPMeterMod(
-                datapath=dp, command=ofp.OFPMC_ADD,
-                flags=ofp.OFPMF_KBPS | ofp.OFPMF_BURST, meter_id=mid,
-                bands=[p.OFPMeterBandDrop(rate=METER_EMBB_KBPS, burst_size=400)]))
-            self._flow(dp, T_CLASSIFY, 300, self._ip(p, ipv4_src=ue),
-                       actions=[p.OFPActionSetField(ip_dscp=DSCP['embb'])],
-                       goto=T_FORWARD, meter=mid, cookie=0x3)
-        for ue in URLLC_UE:
-            self._flow(dp, T_CLASSIFY, 300, self._ip(p, ipv4_src=ue),
-                       actions=[p.OFPActionSetField(ip_dscp=DSCP['urllc'])],
-                       goto=T_FORWARD, cookie=0x3)
+        # eMBB Ingress Meters (4 Mbps) & DSCP Marking (AF41 / 34)
+        for phone in ['10.0.0.3', '10.0.0.4']:
+            mid = METER_ID[phone]
+            dp.send_msg(parser.OFPMeterMod(
+                dp, command=ofp.OFPMC_ADD, flags=ofp.OFPMF_KBPS | ofp.OFPMF_BURST, meter_id=mid,
+                bands=[parser.OFPMeterBandDrop(rate=METER_EMBB_KBPS, burst_size=400)]
+            ))
+            self._add_flow(dp, T_CLASSIFY, 300, self._ip_match(parser, ipv4_src=phone),
+                           actions=[parser.OFPActionSetField(ip_dscp=DSCP['embb'])],
+                           goto=T_FORWARD, meter=mid, cookie=0x3)
 
-    # ---- s6 / gNodeB-B: ACL + marking (+ the car when it has handed over) --------
+        # URLLC DSCP Marking (EF / 46)
+        for car in ['10.0.0.5', '10.0.0.6', MOBILE_UE]:
+            self._add_flow(dp, T_CLASSIFY, 300, self._ip_match(parser, ipv4_src=car),
+                           actions=[parser.OFPActionSetField(ip_dscp=DSCP['urllc'])],
+                           goto=T_FORWARD, cookie=0x3)
+
     def _setup_s6(self, dp):
-        p = dp.ofproto_parser
-        self.last_pkts = {k: v for k, v in self.last_pkts.items() if k[0] != 6}
-        self.quarantined.clear()
-        for ue in MMTC_UE:
-            self._flow(dp, T_CLASSIFY, 400, self._ip(p, ipv4_src=ue, ipv4_dst=H2),
+        """gNodeB-B: IoT mMTC DSCP marking and URLLC isolation ACL."""
+        parser = dp.ofproto_parser
+        for sensor in MMTC_UE:
+            self._add_flow(dp, T_CLASSIFY, 400, self._ip_match(parser, ipv4_src=sensor, ipv4_dst=H2),
+                           actions=[], cookie=0x2)
+            self._add_flow(dp, T_CLASSIFY, 300, self._ip_match(parser, ipv4_src=sensor),
+                           actions=[parser.OFPActionSetField(ip_dscp=DSCP['mmtc'])],
+                           goto=T_FORWARD, cookie=0x3)
+
+        # Mobile Car support when roaming on s6
+        self._add_flow(dp, T_CLASSIFY, 400, self._ip_match(parser, ipv4_src=MOBILE_UE, ipv4_dst=H1),
                        actions=[], cookie=0x2)
-            self._flow(dp, T_CLASSIFY, 300, self._ip(p, ipv4_src=ue),
-                       actions=[p.OFPActionSetField(ip_dscp=DSCP['mmtc'])],
+        self._add_flow(dp, T_CLASSIFY, 300, self._ip_match(parser, ipv4_src=MOBILE_UE),
+                       actions=[parser.OFPActionSetField(ip_dscp=DSCP['urllc'])],
                        goto=T_FORWARD, cookie=0x3)
-        # the mobile car must be handled identically whichever gNodeB it sits on
-        self._flow(dp, T_CLASSIFY, 400, self._ip(p, ipv4_src=MOBILE_UE, ipv4_dst=H1),
-                   actions=[], cookie=0x2)
-        self._flow(dp, T_CLASSIFY, 300, self._ip(p, ipv4_src=MOBILE_UE),
-                   actions=[p.OFPActionSetField(ip_dscp=DSCP['urllc'])],
-                   goto=T_FORWARD, cookie=0x3)
 
-    # ---- s1 / core ingress: DSCP -> metadata, slice routing, failover, mirror ----
+    def _setup_s7(self, dp):
+        """gNodeB-C (Stadium / Industrial): Robot (URLLC) & AR Headset (eMBB) setup."""
+        ofp, parser = dp.ofproto, dp.ofproto_parser
+        # Robot h12 (URLLC)
+        self._add_flow(dp, T_CLASSIFY, 400, self._ip_match(parser, ipv4_src='10.0.0.12', ipv4_dst=H1),
+                       actions=[], cookie=0x2)
+        self._add_flow(dp, T_CLASSIFY, 300, self._ip_match(parser, ipv4_src='10.0.0.12'),
+                       actions=[parser.OFPActionSetField(ip_dscp=DSCP['urllc'])],
+                       goto=T_FORWARD, cookie=0x3)
+
+        # AR Headset h13 (eMBB)
+        self._add_flow(dp, T_CLASSIFY, 400, self._ip_match(parser, ipv4_src='10.0.0.13', ipv4_dst=H2),
+                       actions=[], cookie=0x2)
+        mid = METER_ID['10.0.0.13']
+        dp.send_msg(parser.OFPMeterMod(
+            dp, command=ofp.OFPMC_ADD, flags=ofp.OFPMF_KBPS | ofp.OFPMF_BURST, meter_id=mid,
+            bands=[parser.OFPMeterBandDrop(rate=METER_EMBB_KBPS, burst_size=400)]
+        ))
+        self._add_flow(dp, T_CLASSIFY, 300, self._ip_match(parser, ipv4_src='10.0.0.13'),
+                       actions=[parser.OFPActionSetField(ip_dscp=DSCP['embb'])],
+                       goto=T_FORWARD, meter=mid, cookie=0x3)
+
+        # Mobile Car support when roaming on s7
+        self._add_flow(dp, T_CLASSIFY, 400, self._ip_match(parser, ipv4_src=MOBILE_UE, ipv4_dst=H1),
+                       actions=[], cookie=0x2)
+        self._add_flow(dp, T_CLASSIFY, 300, self._ip_match(parser, ipv4_src=MOBILE_UE),
+                       actions=[parser.OFPActionSetField(ip_dscp=DSCP['urllc'])],
+                       goto=T_FORWARD, cookie=0x3)
+
+    # -------------------------------------------------------------------------
+    # Core & Aggregation Switch Pipelines: s1, s3, s4, s10
+    # -------------------------------------------------------------------------
     def _setup_s1(self, dp):
-        ofp, p = dp.ofproto, dp.ofproto_parser
-        self.te_active = False
-        self.last_tx.clear()
-
+        """s1 Ingress: Map DSCP -> Metadata, Fast-Failover Group, Probe Mirror."""
+        ofp, parser = dp.ofproto, dp.ofproto_parser
         for name in ('embb', 'urllc'):
-            self._flow(dp, T_CLASSIFY, 200, self._ip(p, ip_dscp=DSCP[name]),
-                       goto=T_FORWARD, write_meta=META[name], cookie=0x3)
+            self._add_flow(dp, T_CLASSIFY, 200, self._ip_match(parser, ip_dscp=DSCP[name]),
+                           goto=T_FORWARD, write_meta=META[name], cookie=0x3)
 
-        # FF group: bucket 1 = SHORT path (port 2, s4), bucket 2 = diagonal (port 4, s3 -> s4)
+        # Uplink Fast-Failover: Primary = port 2 (s4), Backup = port 4 (s3 diagonal)
         buckets = [
-            p.OFPBucket(watch_port=2, watch_group=ofp.OFPG_ANY, actions=self._out(p, 2, queue=0)),
-            p.OFPBucket(watch_port=4, watch_group=ofp.OFPG_ANY, actions=self._out(p, 4)),
+            parser.OFPBucket(watch_port=2, watch_group=ofp.OFPG_ANY,
+                             actions=self._out_actions(parser, 2, queue=0)),
+            parser.OFPBucket(watch_port=4, watch_group=ofp.OFPG_ANY,
+                             actions=self._out_actions(parser, 4)),
         ]
-        dp.send_msg(p.OFPGroupMod(datapath=dp, command=ofp.OFPGC_ADD,
-                                  type_=ofp.OFPGT_FF, group_id=GROUP_URLLC_UP, buckets=buckets))
+        dp.send_msg(parser.OFPGroupMod(dp, command=ofp.OFPGC_ADD, type_=ofp.OFPGT_FF,
+                                      group_id=GROUP_URLLC_UP, buckets=buckets))
 
-        # URLLC: mirror a copy to the probe, then the failover group
-        self._flow(dp, T_FORWARD, 300,
-                   p.OFPMatch(eth_type=0x0800, metadata=META['urllc'], ipv4_dst=H2),
-                   actions=[p.OFPActionOutput(PROBE_PORT), p.OFPActionGroup(GROUP_URLLC_UP)],
-                   cookie=0x4)
-        # eMBB: LONG path (port 1) in its own queue
-        self._flow(dp, T_FORWARD, 300,
-                   p.OFPMatch(eth_type=0x0800, metadata=META['embb'], ipv4_dst=H1),
-                   actions=self._out(p, 1, queue=0), cookie=0x4)
+        # URLLC: Mirror copy to Probe h11 (port 5), then output to Fast-Failover group
+        self._add_flow(
+            dp, T_FORWARD, 300,
+            parser.OFPMatch(eth_type=0x0800, metadata=META['urllc'], ipv4_dst=H2),
+            actions=[parser.OFPActionOutput(PROBE_PORT), parser.OFPActionGroup(GROUP_URLLC_UP)],
+            cookie=0x4
+        )
+        # eMBB: Long Path queue (port 1 -> s2)
+        self._add_flow(
+            dp, T_FORWARD, 300,
+            parser.OFPMatch(eth_type=0x0800, metadata=META['embb'], ipv4_dst=H1),
+            actions=self._out_actions(parser, 1, queue=0),
+            cookie=0x4
+        )
 
-    def _te_override(self, dp, enable):
-        """Move PHONE_TE onto the diagonal (s1 port 4) or back."""
-        ofp, p = dp.ofproto, dp.ofproto_parser
-        match = p.OFPMatch(eth_type=0x0800, metadata=META['embb'],
-                           ipv4_src=PHONE_TE, ipv4_dst=H1)
-        if enable:
-            self._flow(dp, T_FORWARD, 350, match, actions=self._out(p, 4), cookie=0x6)
-        else:
-            dp.send_msg(p.OFPFlowMod(datapath=dp, table_id=T_FORWARD,
-                                     command=ofp.OFPFC_DELETE_STRICT, priority=350,
-                                     match=match, out_port=ofp.OFPP_ANY,
-                                     out_group=ofp.OFPG_ANY))
-
-    # ---- s3: mMTC uplink queue ---------------------------------------------------
     def _setup_s3(self, dp):
-        p = dp.ofproto_parser
-        self._flow(dp, T_FORWARD, 300, self._ip(p, ip_dscp=DSCP['mmtc'], ipv4_dst=H1),
-                   actions=self._out(p, 1, queue=0), cookie=0x4)
+        """s3 Transit: Queue for mMTC uplink traffic towards collector."""
+        parser = dp.ofproto_parser
+        self._add_flow(dp, T_FORWARD, 300, self._ip_match(parser, ip_dscp=DSCP['mmtc'], ipv4_dst=H1),
+                       actions=self._out_actions(parser, 1, queue=0), cookie=0x4)
 
-    # ---- s4 / URLLC UPF edge: downlink failover ------------------------------------
     def _setup_s4(self, dp):
-        ofp, p = dp.ofproto, dp.ofproto_parser
+        """s4 Downlink Core: Downlink Fast-Failover (Primary: port 2, Backup: port 1)."""
+        ofp, parser = dp.ofproto, dp.ofproto_parser
         buckets = [
-            p.OFPBucket(watch_port=2, watch_group=ofp.OFPG_ANY, actions=self._out(p, 2)),
-            p.OFPBucket(watch_port=1, watch_group=ofp.OFPG_ANY, actions=self._out(p, 1)),
+            parser.OFPBucket(watch_port=2, watch_group=ofp.OFPG_ANY, actions=self._out_actions(parser, 2)),
+            parser.OFPBucket(watch_port=1, watch_group=ofp.OFPG_ANY, actions=self._out_actions(parser, 1)),
         ]
-        dp.send_msg(p.OFPGroupMod(datapath=dp, command=ofp.OFPGC_ADD,
-                                  type_=ofp.OFPGT_FF, group_id=GROUP_URLLC_DOWN, buckets=buckets))
+        dp.send_msg(parser.OFPGroupMod(dp, command=ofp.OFPGC_ADD, type_=ofp.OFPGT_FF,
+                                      group_id=GROUP_URLLC_DOWN, buckets=buckets))
 
-    # ---------------------------------------------------------- F-AMF: mobility
+    def _setup_s10(self, dp):
+        """s10 DC Leaf: Attach HTB queue for eMBB & MEC traffic toward UPF."""
+        parser = dp.ofproto_parser
+        self._add_flow(dp, T_FORWARD, 200, self._ip_match(parser, ipv4_dst=H1),
+                       actions=self._out_actions(parser, 2, queue=0), cookie=0x4)
+
+    # =========================================================================
+    # Control Plane Function: F-AMF (3-Way Roaming Handover)
+    # =========================================================================
     @set_ev_cls(ofp_event.EventOFPPortStatus, MAIN_DISPATCHER)
     def port_status_handler(self, ev):
         msg = ev.msg
         dp, ofp = msg.datapath, msg.datapath.ofproto
         port = msg.desc.port_no
         down = bool(msg.desc.state & ofp.OFPPS_LINK_DOWN) or bool(msg.desc.config & ofp.OFPPC_PORT_DOWN)
-        self.logger.warning("[LINK] s%d port %d is %s (reason %d)", dp.id, port,
+        self.logger.warning("[PORT] s%d port %d is %s (reason %d)", dp.id, port,
                             "DOWN" if down else "UP", msg.reason)
 
-        if MOBILE_PORT.get(dp.id) != port:
+        if MOBILE_PORTS.get(dp.id) != port:
             return
         if msg.reason == ofp.OFPPR_ADD:
-            self._handover(dp.id, port)
+            self._execute_handover(dp.id, port)
         elif msg.reason == ofp.OFPPR_DELETE and self.attach[MOBILE_UE][0] == dp.id:
-            self.logger.warning("[AMF] %s detached from s%d (handover gap)", MOBILE_UE, dp.id)
+            self.logger.warning("[AMF] %s detached from s%d (in-transit)", MOBILE_UE, dp.id)
 
-    def _handover(self, sw, port):
-        old = self.attach[MOBILE_UE][0]
-        self.attach[MOBILE_UE] = (sw, port)
-        self.logger.warning("[AMF] HANDOVER %s: gNodeB s%d -> s%d, rewriting downlink routes",
-                            MOBILE_UE, old, sw)
+    def _execute_handover(self, new_sw, new_port):
+        old_sw = self.attach[MOBILE_UE][0]
+        self.attach[MOBILE_UE] = (new_sw, new_port)
+        self.logger.warning("[AMF] HANDOVER SUCCESS: %s moved from s%d to s%d (port %d)",
+                            MOBILE_UE, old_sw, new_sw, new_port)
+        # Update downlink routing on all switches to point to new location
         for dp in self.datapaths.values():
             self._install_route(dp, MOBILE_UE)
 
-    # ----------------------------------------------------- monitoring loop (TE, SEC)
-    def _monitor(self):
+    # =========================================================================
+    # Control Plane Function: F-TE (Traffic Engineering) & F-SEC (IoT Defense)
+    # =========================================================================
+    def _monitoring_loop(self):
         while True:
-            hub.sleep(POLL_S)
+            hub.sleep(POLL_INTERVAL)
             for dpid, dp in list(self.datapaths.items()):
-                p, ofp = dp.ofproto_parser, dp.ofproto
+                parser, ofp = dp.ofproto_parser, dp.ofproto
                 if dpid == 1:
-                    dp.send_msg(p.OFPPortStatsRequest(dp, 0, ofp.OFPP_ANY))
-                dp.send_msg(p.OFPFlowStatsRequest(dp, table_id=T_CLASSIFY,
-                                                  cookie=0x2, cookie_mask=0xff))
+                    dp.send_msg(parser.OFPPortStatsRequest(dp, 0, ofp.OFPP_ANY))
                 if dpid == 6:
-                    dp.send_msg(p.OFPFlowStatsRequest(dp, table_id=T_CLASSIFY,
-                                                      cookie=0x3, cookie_mask=0xff))
+                    dp.send_msg(parser.OFPFlowStatsRequest(dp, table_id=T_CLASSIFY,
+                                                          cookie=0x3, cookie_mask=0xff))
 
-    # F-TE ------------------------------------------------------------------------
     @set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
     def port_stats_reply(self, ev):
         dp = ev.msg.datapath
@@ -325,29 +405,41 @@ class Astra5GController(app_manager.RyuApp):
                 if prev:
                     rate[st.port_no] = (st.tx_bytes - prev[1]) * 8 / (now - prev[0]) / 1e6
                 self.last_tx[(1, st.port_no)] = (now, st.tx_bytes)
+
+        r1, r4 = rate.get(1, 0.0), rate.get(4, 0.0)
         if 1 not in rate:
             return
-        r1, r4 = rate[1], rate.get(4, 0.0)
-        self.logger.info("[TE] s1 eMBB path %.2f Mbps, diagonal %.2f Mbps (override=%s)",
+        self.logger.info("[TE] s1 eMBB Primary: %.2f Mbps, Diagonal: %.2f Mbps (Active=%s)",
                          r1, r4, self.te_active)
+
         if not self.te_active and r1 > TE_HIGH_MBPS:
             self.te_active = True
-            self._te_override(dp, True)
-            self.logger.warning("[TE] eMBB path congested -> %s moved to diagonal s1-s3", PHONE_TE)
-        elif self.te_active and r1 + r4 < TE_LOW_MBPS:
+            self._te_reroute(dp, enable=True)
+            self.logger.warning("[TE] High eMBB Congestion! Redirecting %s onto diagonal trunk", PHONE_TE)
+        elif self.te_active and (r1 + r4) < TE_LOW_MBPS:
             self.te_active = False
-            self._te_override(dp, False)
-            self.logger.warning("[TE] load dropped -> %s back on the primary eMBB path", PHONE_TE)
+            self._te_reroute(dp, enable=False)
+            self.logger.warning("[TE] Load normalized. Restoring %s to primary path", PHONE_TE)
 
-    # F-SEC + ACL counters ----------------------------------------------------------
+    def _te_reroute(self, dp, enable):
+        ofp, parser = dp.ofproto, dp.ofproto_parser
+        match = parser.OFPMatch(eth_type=0x0800, metadata=META['embb'],
+                                ipv4_src=PHONE_TE, ipv4_dst=H1)
+        if enable:
+            self._add_flow(dp, T_FORWARD, 350, match, actions=self._out_actions(parser, 4), cookie=0x6)
+        else:
+            dp.send_msg(parser.OFPFlowMod(dp, table_id=T_FORWARD, command=ofp.OFPFC_DELETE_STRICT,
+                                          priority=350, match=match, out_port=ofp.OFPP_ANY,
+                                          out_group=ofp.OFPG_ANY))
+
     @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
     def flow_stats_reply(self, ev):
         dp = ev.msg.datapath
+        if dp.id != 6:
+            return
         now = time.time()
         for st in ev.msg.body:
-            if st.cookie == 0x2 and st.packet_count:
-                self.logger.info("[ACL] s%d blocked %d pkts  %s", dp.id, st.packet_count, st.match)
-            elif st.cookie == 0x3 and dp.id == 6:
+            if st.cookie == 0x3:
                 src = st.match.get('ipv4_src')
                 if src not in MMTC_UE:
                     continue
@@ -357,9 +449,9 @@ class Astra5GController(app_manager.RyuApp):
                     continue
                 pps = (st.packet_count - prev[1]) / (now - prev[0])
                 if pps > QUARANTINE_PPS and self.quarantined.get(src, 0) < now:
-                    self.quarantined[src] = now + QUARANTINE_S
-                    p = dp.ofproto_parser
-                    self._flow(dp, T_CLASSIFY, 500, self._ip(p, ipv4_src=src), actions=[],
-                               cookie=0x5, hard_timeout=QUARANTINE_S)
-                    self.logger.warning("[SEC] %s sends %.0f pps -> QUARANTINED for %ds",
-                                        src, pps, QUARANTINE_S)
+                    self.quarantined[src] = now + QUARANTINE_SECS
+                    parser = dp.ofproto_parser
+                    self._add_flow(dp, T_CLASSIFY, 500, self._ip_match(parser, ipv4_src=src),
+                                   actions=[], cookie=0x5, hard_timeout=QUARANTINE_SECS)
+                    self.logger.warning("[SEC] IoT Flood Detected! %s sent %.0f PPS -> QUARANTINED for %ds",
+                                        src, pps, QUARANTINE_SECS)
