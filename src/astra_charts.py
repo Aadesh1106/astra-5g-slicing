@@ -147,45 +147,53 @@ def draw_topology():
             color='#2980b9', fontweight='bold', bbox=dict(boxstyle='round,pad=0.3', facecolor='#ebf5fb', edgecolor='none'))
     ax.text(7.5, -2.0, 'RAN Edge:\ngNodeB-C (Stadium/Factory)', fontsize=10, ha='center',
             color='#2980b9', fontweight='bold', bbox=dict(boxstyle='round,pad=0.3', facecolor='#ebf5fb', edgecolor='none'))
-    ax.text(1.5, -1.25, '10 Mbps Core Ring\n(2ms per hop)\nDiagonal TE Link: 6ms',
-            fontsize=10, ha='center', color='#d35400', fontweight='bold')
+    ax.text(1.2, -1.8, 'Core Ring: 10 Mbps (2ms/hop)\nDiagonal TE: 6ms',
+            fontsize=9.5, ha='center', color='#d35400', fontweight='bold',
+            bbox=dict(boxstyle='round,pad=0.2', facecolor='#ffffff', edgecolor='#e67e22', alpha=0.85, lw=1))
     ax.text(1.5, -6.6, 'Data Center Domain\n(s9 Spine, s10 Leaf)', fontsize=10, ha='center',
             color='#2c3e50', fontweight='bold')
 
-    # Visual roaming path indication for h10
-    ax.annotate('', xy=pos['s6'], xytext=pos['s5'],
-                arrowprops=dict(arrowstyle="->", connectionstyle="arc3,rad=-0.2",
-                                color='#e74c3c', lw=1.5, ls=':'))
-    ax.annotate('', xy=pos['s7'], xytext=pos['s6'],
-                arrowprops=dict(arrowstyle="->", connectionstyle="arc3,rad=-0.2",
-                                color='#e74c3c', lw=1.5, ls=':'))
-    ax.text(0.5, 2.0, 'Mobile Handover Path (h10): s5 <-> s6 <-> s7',
-            fontsize=11, color='#c0392b', fontweight='bold',
-            bbox=dict(boxstyle='round,pad=0.4', facecolor='#fdedec', edgecolor='#e74c3c', lw=1))
+    # Visual roaming path indication for h10 (clean outer arc avoiding nodes)
+    ax.annotate('', xy=(pos['s6'][0] - 0.45, pos['s6'][1] - 0.1), xytext=(pos['s5'][0] - 0.2, pos['s5'][1] - 0.5),
+                arrowprops=dict(arrowstyle="->", connectionstyle="arc3,rad=0.42",
+                                color='#e74c3c', lw=2.0, ls=':', mutation_scale=15))
+    ax.annotate('', xy=(pos['s7'][0] - 0.4, pos['s7'][1] - 0.4), xytext=(pos['s6'][0] + 0.35, pos['s6'][1] + 0.3),
+                arrowprops=dict(arrowstyle="->", connectionstyle="arc3,rad=-0.22",
+                                color='#e74c3c', lw=2.0, ls=':', mutation_scale=15))
+    ax.text(1.5, 2.1, 'Mobile UE Roaming Trajectory (h10): s5 <-> s6 <-> s7',
+            fontsize=10.5, color='#c0392b', fontweight='bold', ha='center',
+            bbox=dict(boxstyle='round,pad=0.4', facecolor='#fdedec', edgecolor='#e74c3c', lw=1.2))
 
-    # Clean Legend with dedicated Line2D proxy markers
-    legend_elements = [
+    # Comprehensive Legend with dedicated node and link/line style entries
+    node_legend_elements = [
         Line2D([0], [0], marker='o', color='none', label='Core Ring (s1-s4)',
-               markerfacecolor='#d35400', markeredgecolor='#ba4a00', markersize=10),
+               markerfacecolor='#d35400', markeredgecolor='#ba4a00', markersize=9),
         Line2D([0], [0], marker='o', color='none', label='Regional Gateway (s8)',
-               markerfacecolor='#b9770e', markeredgecolor='#9a630b', markersize=10),
+               markerfacecolor='#b9770e', markeredgecolor='#9a630b', markersize=9),
         Line2D([0], [0], marker='o', color='none', label='DC Spine / Leaf (s9-s10)',
-               markerfacecolor='#2c3e50', markeredgecolor='#1b2631', markersize=10),
+               markerfacecolor='#2c3e50', markeredgecolor='#1b2631', markersize=9),
         Line2D([0], [0], marker='o', color='none', label='RAN gNodeBs (s5-s7)',
-               markerfacecolor='#2980b9', markeredgecolor='#21618c', markersize=10),
-        Line2D([0], [0], marker='o', color='none', label='Servers & Probes (UPF/MEC/NOC)',
-               markerfacecolor='#16a085', markeredgecolor='#117a65', markersize=9),
+               markerfacecolor='#2980b9', markeredgecolor='#21618c', markersize=9),
+        Line2D([0], [0], marker='o', color='none', label='Infrastructure (UPF/MEC/NOC)',
+               markerfacecolor='#16a085', markeredgecolor='#117a65', markersize=8),
         Line2D([0], [0], marker='o', color='none', label='eMBB UEs (Phones / AR)',
-               markerfacecolor='#8e44ad', markeredgecolor='#6c3483', markersize=8),
+               markerfacecolor='#8e44ad', markeredgecolor='#6c3483', markersize=7.5),
         Line2D([0], [0], marker='o', color='none', label='URLLC UEs (Cars / Robot)',
-               markerfacecolor='#c0392b', markeredgecolor='#922b21', markersize=8),
+               markerfacecolor='#c0392b', markeredgecolor='#922b21', markersize=7.5),
         Line2D([0], [0], marker='o', color='none', label='mMTC Sensors (Smart City)',
-               markerfacecolor='#f39c12', markeredgecolor='#d68910', markersize=8),
-        Line2D([0], [0], marker='s', color='none', label='Mobile UE (Roams s5-s6-s7)',
-               markerfacecolor='#e74c3c', markeredgecolor='#c0392b', markersize=9),
+               markerfacecolor='#f39c12', markeredgecolor='#d68910', markersize=7.5),
+        Line2D([0], [0], marker='s', color='none', label='Mobile UE h10 (Roams s5-s6-s7)',
+               markerfacecolor='#e74c3c', markeredgecolor='#c0392b', markersize=8),
+        # Link Types & Dotted Line Annotations
+        Line2D([0], [0], color='#2c3e50', lw=3.5, label='Physical Core Ring Trunk'),
+        Line2D([0], [0], color='#2980b9', lw=2.5, label='RAN Edge Uplink (s5/s6/s7)'),
+        Line2D([0], [0], color='#34495e', lw=2.5, label='Data Center Fabric Link'),
+        Line2D([0], [0], color='#e67e22', lw=2.5, ls='--', label='Diagonal Backup/TE Link (s1-s3)'),
+        Line2D([0], [0], color='#e74c3c', lw=2.0, ls=':', label='Mobile UE Handover Trajectory (AMF)'),
+        Line2D([0], [0], color='#bdc3c7', lw=1.2, label='Host Attachment Link (veth)'),
     ]
-    ax.legend(handles=legend_elements, loc='upper right', bbox_to_anchor=(0.98, 0.98),
-              fontsize=9.5, labelspacing=0.75, handletextpad=0.8, borderpad=0.8,
+    ax.legend(handles=node_legend_elements, loc='upper right', bbox_to_anchor=(0.99, 0.99),
+              fontsize=8.5, labelspacing=0.55, handletextpad=0.7, borderpad=0.7,
               framealpha=0.95, facecolor='#f8f9f9', edgecolor='#bdc3c7')
     ax.set_title('Astra: 5G Slice-Aware SDN Transport Fabric Topology\n'
                  '10 OpenFlow 1.3 Switches (s1-s10) | 15 Hosts (h1-h15) | Multi-Domain RAN, Core Ring & DC',

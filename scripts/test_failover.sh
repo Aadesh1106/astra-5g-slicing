@@ -1,5 +1,5 @@
 #!/bin/bash
-# Demonstrates URLLC fast failover: cut the primary fast path, watch traffic move to the diagonal backup path.
+# Demonstrates URLLC fast failover: cut primary trunk s1-eth2 (s1 <-> s4) carrying traffic from s5 (h5, h6) to s4 (h2), watch traffic seamlessly move to the diagonal backup path (s1 -> s3 -> s4).
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/scripts/common.sh"
 echo "--- before: RTT on SHORT path"; hexec h5 ping -c 3 -q 10.0.0.2 | tail -1
