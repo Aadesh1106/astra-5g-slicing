@@ -303,7 +303,7 @@ def draw_performance():
         ax.text(i, v * 1.25, f'{v:.0f} ms', ha='center', fontsize=12, fontweight='bold')
 
     ratio = urllc_l[0] / urllc_l[3] if urllc_l[3] > 0 else 0
-    ax.text(0.5, 0.65, f'{ratio:.0f}x Latency Improvement\n(2308 ms -> 13 ms)',
+    ax.text(0.5, 0.65, f'{ratio:.0f}x Latency Improvement\n({urllc_l[0]:.0f} ms -> {urllc_l[3]:.0f} ms)',
             transform=ax.transAxes, fontsize=18, color='#27ae60', fontweight='bold', ha='center',
             bbox=dict(facecolor='white', alpha=0.9, edgecolor='#27ae60', boxstyle='round,pad=0.5', lw=1.5))
 
