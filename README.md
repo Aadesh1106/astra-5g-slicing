@@ -70,16 +70,16 @@ flowchart TD
     h15((h15 NOC Monitor)) --> s8
 
     %% Uplinks
-    RAN_A ==>|10M / 1ms| s1
-    RAN_B ==>|10M / 1ms| s3
-    RAN_C ==>|10M / 1ms| s8
+    RAN_A ==>|10M / 1ms Uplink| s1
+    RAN_B ==>|10M / 1ms Uplink| s3
+    RAN_C ==>|10M / 1ms Uplink| s8
 
     %% Ring & Core Interconnects
-    s1 ===|Fast-Path 2ms| s4
-    s1 ---|Metro 2ms| s2
-    s2 ---|Metro 2ms| s3
-    s3 ---|Metro 2ms| s4
-    s1 -.->|Diagonal TE Link 6ms| s3
+    s1 ===|Fast-Path Short Trunk 2ms| s4
+    s1 ---|Metro Ring 2ms| s2
+    s2 ---|Metro Ring 2ms| s3
+    s3 ---|Metro Ring 2ms| s4
+    s1 -.-|Diagonal Backup & TE Link 6ms| s3
     s8 --- s2
     s8 --- s3
 
@@ -90,11 +90,19 @@ flowchart TD
     s10 --> h1
     s10 --> h14
 
+    %% Diagram Legend
+    subgraph Legend [Topology & Link Legend]
+        l1[Solid Line '---' / '==='] ---|Physical Core Ring & Interconnect Trunks| l2[Core Switches]
+        l3[Double Line '==>'] ---|RAN Base Station Edge Uplink| l4[gNodeB to Core Gateway]
+        l5[Dotted Line '-.-'] ---|Diagonal Backup & TE Route s1-s3| l6[Failover / Overflow Transit]
+    end
+
     style RAN_A fill:#e0f2fe,stroke:#0284c7,stroke-width:2px,color:#000
     style RAN_B fill:#fef9c3,stroke:#ca8a04,stroke-width:2px,color:#000
     style RAN_C fill:#f3e8ff,stroke:#9333ea,stroke-width:2px,color:#000
     style Core_Ring fill:#ffedd5,stroke:#ea580c,stroke-width:2px,color:#000
     style Data_Center fill:#f1f5f9,stroke:#475569,stroke-width:2px,color:#000
+    style Legend fill:#ffffff,stroke:#94a3b8,stroke-width:1.5px,stroke-dasharray: 4 4,color:#000
 ```
 
 ## Architecture & Slicing Design
@@ -122,7 +130,7 @@ The controller (`src/astra_controller.py`) is fully **proactive** (no MAC learni
 | Function | What happens |
 |---|---|
 | Slice pipeline | Table 0: ACLs (slice isolation), per-phone meters (4 Mbps), DSCP marking (46/34/8). Table 1: routing; `s1` routes by slice using DSCP->metadata |
-| URLLC failover | Fast-failover group on `s1` (short path `s1-eth2`, backup via diagonal) and on `s4` for the downlink |
+| URLLC failover | Fast-failover groups on `s1` (uplink: primary short trunk `s1-eth2` to `s4`, backup via diagonal `s1` $\rightarrow$ `s3` $\rightarrow$ `s4`) and on `s4` (downlink); protects URLLC UEs on `s5` reaching UPF `h2` on `s4` |
 | URLLC mirroring | `s1` copies URLLC packets to the probe h11 |
 | Mobility (AMF) | `scripts/handover.sh <s5|s6|s7>` moves h10's port; the controller reacts to PORT_STATUS and rewrites h10's routes across the entire fabric |
 | Traffic engineering | Port stats on `s1`; if the eMBB path exceeds 3 Mbps, phone h4 is moved onto the diagonal (reverts below 2 Mbps) |

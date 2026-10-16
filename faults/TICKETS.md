@@ -10,9 +10,10 @@ Each incident is solvable in **3 to 4 targeted commands**, verified with `sudo b
 - **Severity**: P1 - Critical Outage
 - **Reported By**: Connected Mobility & Smart Factory Operations
 - **Symptoms**:
-  - Scheduled maintenance severed the direct trunk (`s1-eth2`) between Aggregator `s1` and Core South `s4`.
-  - Autonomous vehicles (`h5`, `h6`) and factory robotics (`h12`) completely lost connectivity to the Dedicated URLLC UPF (`h2`).
-  - The fast-failover backup mechanism failed to route packets around the ring via the diagonal link, and queue isolation was missing on the backup link.
+  - Scheduled maintenance severed the direct trunk (`s1-eth2`) between Ingress Aggregator `s1` and Core South `s4`.
+  - Autonomous vehicles (`h5`, `h6` attached to gNodeB-A `s5`, which uplinks to `s1`) and factory robotics (`h12` on `s7`) lost connectivity to the Dedicated URLLC UPF (`h2` attached to `s4`).
+  - Because `s1` is the transit ingress connecting `s5` to the core fabric, the severed `s1` $\leftrightarrow$ `s4` link breaks the primary URLLC path (`h5`/`h6` $\rightarrow$ `s5` $\rightarrow$ `s1` $\rightarrow$ `s4` $\rightarrow$ `h2`).
+  - The OpenFlow Fast-Failover group on `s1` misbehaved by routing backup traffic back into dead port 2 instead of the diagonal backup link (`s1` $\rightarrow$ `s3` $\rightarrow$ `s4`), blackholing URLLC traffic.
 - **Diagnostic Hint**:
   - Inspect OpenFlow Fast-Failover groups on `s1` (`group 1`) and `s4` (`group 2`). Check transit forwarding and priority queueing on `s3`.
 
