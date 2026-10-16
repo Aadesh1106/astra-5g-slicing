@@ -147,22 +147,11 @@ def draw_topology():
             color='#2980b9', fontweight='bold', bbox=dict(boxstyle='round,pad=0.3', facecolor='#ebf5fb', edgecolor='none'))
     ax.text(7.5, -2.0, 'RAN Edge:\ngNodeB-C (Stadium/Factory)', fontsize=10, ha='center',
             color='#2980b9', fontweight='bold', bbox=dict(boxstyle='round,pad=0.3', facecolor='#ebf5fb', edgecolor='none'))
-    ax.text(1.2, -1.8, 'Core Ring: 10 Mbps (2ms/hop)\nDiagonal TE: 6ms',
+    ax.text(1.5, 0.45, 'Core Ring: 10 Mbps (2ms/hop) | Diagonal TE: 6ms',
             fontsize=9.5, ha='center', color='#d35400', fontweight='bold',
-            bbox=dict(boxstyle='round,pad=0.2', facecolor='#ffffff', edgecolor='#e67e22', alpha=0.85, lw=1))
+            bbox=dict(boxstyle='round,pad=0.3', facecolor='#ffffff', edgecolor='#e67e22', alpha=0.9, lw=1))
     ax.text(1.5, -6.6, 'Data Center Domain\n(s9 Spine, s10 Leaf)', fontsize=10, ha='center',
             color='#2c3e50', fontweight='bold')
-
-    # Visual roaming path indication for h10 (clean outer arc avoiding nodes)
-    ax.annotate('', xy=(pos['s6'][0] - 0.45, pos['s6'][1] - 0.1), xytext=(pos['s5'][0] - 0.2, pos['s5'][1] - 0.5),
-                arrowprops=dict(arrowstyle="->", connectionstyle="arc3,rad=0.42",
-                                color='#e74c3c', lw=2.0, ls=':', mutation_scale=15))
-    ax.annotate('', xy=(pos['s7'][0] - 0.4, pos['s7'][1] - 0.4), xytext=(pos['s6'][0] + 0.35, pos['s6'][1] + 0.3),
-                arrowprops=dict(arrowstyle="->", connectionstyle="arc3,rad=-0.22",
-                                color='#e74c3c', lw=2.0, ls=':', mutation_scale=15))
-    ax.text(1.5, 2.1, 'Mobile UE Roaming Trajectory (h10): s5 <-> s6 <-> s7',
-            fontsize=10.5, color='#c0392b', fontweight='bold', ha='center',
-            bbox=dict(boxstyle='round,pad=0.4', facecolor='#fdedec', edgecolor='#e74c3c', lw=1.2))
 
     # Comprehensive Legend with dedicated node and link/line style entries
     node_legend_elements = [
@@ -184,12 +173,11 @@ def draw_topology():
                markerfacecolor='#f39c12', markeredgecolor='#d68910', markersize=7.5),
         Line2D([0], [0], marker='s', color='none', label='Mobile UE h10 (Roams s5-s6-s7)',
                markerfacecolor='#e74c3c', markeredgecolor='#c0392b', markersize=8),
-        # Link Types & Dotted Line Annotations
-        Line2D([0], [0], color='#2c3e50', lw=3.5, label='Physical Core Ring Trunk'),
-        Line2D([0], [0], color='#2980b9', lw=2.5, label='RAN Edge Uplink (s5/s6/s7)'),
+        # Link Types
+        Line2D([0], [0], color='#2c3e50', lw=3.5, label='Core Ring Trunk (10M / 2ms)'),
+        Line2D([0], [0], color='#2980b9', lw=2.5, label='RAN Edge Uplink (10M / 1ms)'),
         Line2D([0], [0], color='#34495e', lw=2.5, label='Data Center Fabric Link'),
-        Line2D([0], [0], color='#e67e22', lw=2.5, ls='--', label='Diagonal Backup/TE Link (s1-s3)'),
-        Line2D([0], [0], color='#e74c3c', lw=2.0, ls=':', label='Mobile UE Handover Trajectory (AMF)'),
+        Line2D([0], [0], color='#e67e22', lw=2.5, ls='--', label='Diagonal Backup/TE Link (s1-s3, 6ms)'),
         Line2D([0], [0], color='#bdc3c7', lw=1.2, label='Host Attachment Link (veth)'),
     ]
     ax.legend(handles=node_legend_elements, loc='upper right', bbox_to_anchor=(0.99, 0.99),
