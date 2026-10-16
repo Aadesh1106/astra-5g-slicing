@@ -115,7 +115,7 @@ flowchart TD
 
 ## Use case: slice-aware 5G transport (failover, mobility, traffic engineering, IoT quarantine)
 
-Topology additions over the base lab: **h10** (mobile car that hands over between gNodeB-A `s5` and gNodeB-B `s6`), **h11** (monitoring probe on `s1`), and a **diagonal core link s1-s3**.
+Topology additions over the base lab: **h10** (mobile car that hands over between gNodeB-A `s5`, gNodeB-B `s6`, and gNodeB-C `s7`), **h11** (monitoring probe on `s1`), and a **diagonal core link s1-s3**.
 
 The controller (`src/astra_controller.py`) is fully **proactive** (no MAC learning, no flooding, no STP) with a two-table OpenFlow 1.3 pipeline, BFS-computed routes, and four control-plane functions:
 
@@ -124,13 +124,13 @@ The controller (`src/astra_controller.py`) is fully **proactive** (no MAC learni
 | Slice pipeline | Table 0: ACLs (slice isolation), per-phone meters (4 Mbps), DSCP marking (46/34/8). Table 1: routing; `s1` routes by slice using DSCP->metadata |
 | URLLC failover | Fast-failover group on `s1` (short path `s1-eth2`, backup via diagonal) and on `s4` for the downlink |
 | URLLC mirroring | `s1` copies URLLC packets to the probe h11 |
-| Mobility (AMF) | `scripts/handover.sh s6` moves h10's port to `s6`; the controller reacts to PORT_STATUS and rewrites h10's routes on all switches |
+| Mobility (AMF) | `scripts/handover.sh <s5|s6|s7>` moves h10's port; the controller reacts to PORT_STATUS and rewrites h10's routes across the entire fabric |
 | Traffic engineering | Port stats on `s1`; if the eMBB path exceeds 3 Mbps, phone h4 is moved onto the diagonal (reverts below 2 Mbps) |
 | IoT quarantine | Per-sensor packet rate on `s6`; a sensor above 200 pps gets a 30 s drop rule |
 
 ```bash
 sudo bash scripts/run_usecase.sh        # controller + topology + queues + healthcheck
-sudo bash scripts/healthcheck.sh        # 10 checks, PASS/FAIL
+sudo bash scripts/healthcheck.sh        # 12 checks, PASS/FAIL
 sudo bash scripts/test_failover.sh      # cut s1<->s4, URLLC moves to the diagonal
 sudo bash scripts/test_handover.sh      # h10 s5 -> s6 -> s5
 sudo bash scripts/test_te.sh            # two phones saturate eMBB, h4 is rerouted
@@ -139,7 +139,7 @@ sudo ovs-ofctl -O OpenFlow13 dump-flows s1
 sudo bash faults/inject.sh 1            # troubleshooting incident 1..4 or all (symptoms: faults/TICKETS.md)
 sudo bash faults/verify.sh 1            # behavioural check that incident 1 is really fixed
 ```
-**Troubleshooting incidents** (`faults/`): four compound scenarios, each with several root causes at different layers (groups, stale flows, meters/interfaces/queues, security policy) and **3 fix commands + a verify run** each. Tickets give symptoms only; `faults/SOLUTIONS.md` has the walkthrough.
+**Troubleshooting incidents** (`faults/`): four compound scenarios, each with several root causes at different layers (groups, stale flows, meters/interfaces/queues, security policy) and **3 to 4 fix commands + a verify run** each. Tickets give symptoms only; `faults/SOLUTIONS.md` has the walkthrough.
 
 Set `RYU_BIN=/path/to/venv/bin/ryu-manager` if Ryu is in a virtualenv. Controller events are logged with `[AMF]`, `[TE]`, `[SEC]`, `[LINK]`, `[ACL]` prefixes in `logs/ryu.log`.
 
@@ -148,7 +148,7 @@ Set `RYU_BIN=/path/to/venv/bin/ryu-manager` if Ryu is in a virtualenv. Controlle
 This testbed models **5G Transport Network Slicing & Transport-Layer Management**, not an over-the-air 3GPP cellular stack:
 - **What is emulated**:
   - Transport-layer slice segregation matching 3GPP service categories: **eMBB** (high throughput), **URLLC** (bounded ultra-low latency, sub-15ms), and **mMTC** (massive sensor rate-limiting).
-  - SDN-based transport gateways: gNodeB edge ingress (`s5`, `s6`) and User Plane Functions (eMBB UPF `h1`, URLLC UPF `h2`).
+  - SDN-based transport gateways: gNodeB edge ingress (`s5`, `s6`, `s7`) and User Plane Functions (eMBB UPF `h1`, URLLC UPF `h2`, MEC `h14`).
   - Transport-layer mobility management (AMF port-status event triggers rehoming UE L2/L3 routes across base stations).
   - Dynamic traffic engineering, QoS metering (OVS OpenFlow meters & Linux HTB queues), and IoT isolation.
 - **What is out of scope (architectural boundaries)**:
@@ -259,12 +259,14 @@ sudo bash faults/verify.sh 1
    *Charts will be saved to `results/figures/`.*
 
 ## Observed Results (Performance)
+ 
+| Metric | No QoS (Congested) | Rate-Limited (Meter Only) | Priority QoS (Queues Active) | Full Contention (All Slices) |
+|---|---|---|---|---|
+| URLLC Throughput | 1.18 Mbps | 8.19 Mbps | 6.50 Mbps | 6.48 Mbps |
+| URLLC Avg Latency | 2029.7 ms | 104.9 ms | 21.6 ms | 12.8 ms |
+| URLLC Jitter | 244.9 ms | 160.5 ms | 32.3 ms | 19.8 ms |
+| eMBB Throughput | 9.51 Mbps | 2.72 Mbps | 2.46 Mbps | 3.79 Mbps |
+| mMTC Throughput | 1.00 Mbps | 1.00 Mbps | 1.00 Mbps | 0.00 Mbps (Contended) |
+| mMTC Packet Loss | 0.0% | 0.0% | 0.0% | 0.0% |
 
-| Metric | Baseline | Rate-limited | Priority QoS |
-|---|---|---|---|
-| URLLC throughput | 1.45 Mbps | 8.18 Mbps | 5.40 Mbps |
-| URLLC avg latency | 2069.7 ms | 135.0 ms | 46.7 ms |
-| URLLC jitter | 289.4 ms | 175.6 ms | 101.6 ms |
-| eMBB throughput | 9.52 Mbps | 2.62 Mbps | 3.30 Mbps |
-
-*Note: URLLC latency improved ~44x from Baseline to Priority QoS.*
+*Note: URLLC latency improves ~158x from congested baseline (2030 ms) to slice-prioritized full contention (12.8 ms / sub-15ms SLA).*
